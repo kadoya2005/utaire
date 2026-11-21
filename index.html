@@ -261,7 +261,7 @@ function flow(){const r=Core.toMora($('lyr').value);notes.forEach((n,i)=>n.lyric
 function report(){
   const r=Core.toMora($('lyr').value),m=r.mora.length,n=notes.length;
   let t=`音符 <b>${n}</b> 個 ／ 歌詞 <b>${m}</b> 音`;
-  if(m&&n!==m)t+=n>m?`。音符が ${n-m} 個多いので、余りは「-」（前の音をのばす）にしました。不要な音符は「前とつなぐ」で減らせます。`:`。歌詞が ${m-n} 音余っています。歌い直すか、長い音符を「半分に分ける」で増やしてください。`;
+  if(m&&n!==m)t+=n>m?`。音符が ${n-m} 個多いです（歌詞を流し込むと、余りは「-」＝前の音をのばす、になります）。不要な音符は「前とつなぐ」で減らせます。`:`。歌詞が ${m-n} 音余っています。歌い直すか、長い音符を「半分に分ける」で増やしてください。`;
   if(r.bad)t+=`<br><span class="bad">ひらがなでない文字があります：${esc(r.bad.slice(0,10))}（漢字はひらがなに直してください）</span>`;
   status(t,false,true);
 }
@@ -279,18 +279,19 @@ function analyze(){
 }
 let audioId=0; // 音声を読み込むたびに増やす。古い処理の結果が新しい音声に混ざらないようにする
 let loading=false;
-function newAudioId(){audioId++;loading=true;$('aiBtn').disabled=true;return audioId} // 録音停止・ファイル選択の瞬間に呼ぶ
+function newAudioId(){audioId++;loading=true;if(!asrRun)$('aiBtn').disabled=true;return audioId} // 録音停止・ファイル選択の瞬間に呼ぶ
 async function useBuffer(buf,my){
   if(my===undefined)my=newAudioId();
-  if(my!==audioId)return; // もっと新しい音声が頼まれている
+  if(my!==audioId)return false; // もっと新しい音声が頼まれている
   let ab;
   try{ab=await ctx().decodeAudioData(buf)}
   catch(e){if(my===audioId){loading=false;if(!asrRun)$('aiBtn').disabled=!audio}throw e}
-  if(my!==audioId)return; // 後から選んだ音声のほうを優先
+  if(my!==audioId)return false; // 後から選んだ音声のほうを優先
   loading=false;
   sr=ab.sampleRate;const c0=ab.getChannelData(0);
   if(ab.numberOfChannels>1){const c1=ab.getChannelData(1);audio=new Float32Array(c0.length);for(let i=0;i<c0.length;i++)audio[i]=(c0[i]+c1[i])/2}else audio=c0.slice();
   F=null;analyze();if(!asrRun)$('aiBtn').disabled=false;
+  return true;
 }
 // ---- 声から歌詞（ブラウザの音声認識 → 辞書でひらがなに）----
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
@@ -353,17 +354,17 @@ function run(m){postMessage({id:m.id,kana:tok.tokenize(m.text).map(k=>{
 }).join('').replace(/[ァ-ヶ]/g,c=>String.fromCharCode(c.charCodeAt(0)-0x60))})}
 onmessage=e=>tok?run(e.data):wait.push(e.data);`;
 let kanaW=null,kanaId=0;const kanaWait={};
+function kanaFail(msg){Object.values(kanaWait).forEach(p=>p.rej(new Error(msg)));for(const k in kanaWait)delete kanaWait[k];if(kanaW){kanaW.terminate();kanaW=null}}
 function toKana(text){
   if(/^[\sぁ-ゖァ-ヶー、。！？!?]*$/.test(text))return Promise.resolve(text);
   return new Promise((res,rej)=>{
     if(!kanaW){
       const u=URL.createObjectURL(new Blob([KANA_WORKER],{type:'text/javascript'}));try{kanaW=new Worker(u)}catch(e){rej(e);return}finally{setTimeout(()=>URL.revokeObjectURL(u),1000)}
-      const fail=msg=>{Object.values(kanaWait).forEach(p=>p.rej(new Error(msg)));for(const k in kanaWait)delete kanaWait[k];kanaW&&kanaW.terminate();kanaW=null};
-      kanaW.onmessage=e=>{const d=e.data;if(d.err){fail(d.err);return}const p=kanaWait[d.id];if(p){delete kanaWait[d.id];p.res(d.kana)}};
-      kanaW.onerror=e=>{e.preventDefault();fail('辞書を読み込めませんでした')};
+      kanaW.onmessage=e=>{const d=e.data;if(d.err){kanaFail(d.err);return}const p=kanaWait[d.id];if(p){delete kanaWait[d.id];p.res(d.kana)}};
+      kanaW.onerror=e=>{e.preventDefault();kanaFail('辞書を読み込めませんでした')};
     }
     const id=++kanaId;
-    const timer=setTimeout(()=>{if(kanaWait[id]){delete kanaWait[id];if(kanaW){kanaW.terminate();kanaW=null}rej(new Error('時間切れ'))}},60000);
+    const timer=setTimeout(()=>{if(kanaWait[id])kanaFail('時間切れ')},60000); // 1件でも時間切れなら、待っている要求ごと作り直す
     kanaWait[id]={res:v=>{clearTimeout(timer);res(v)},rej:e=>{clearTimeout(timer);rej(e)}};
     kanaW.postMessage({id,text});
   });
@@ -402,10 +403,11 @@ $('hearBtn').onclick=async()=>{
 // ---- 録音 ----
 let recHear=null,recBusy=false;
 $('recBtn').onclick=async()=>{
-  if(rec){if(rec.state==='recording'){recHear&&recHear.stop();rec.stop()}return} // 先に聞き取りを止めてから録音を止める
+  if(rec){if(rec.state==='recording'){rec.aid=newAudioId();recHear&&recHear.stop();rec.stop()}return} // 番号を取り、先に聞き取りを止めてから録音を止める
   if(recBusy||hearBusy)return;recBusy=true;
   let ms=null,mr=null,myHear=null,myRaf=0;
-  const release=()=>{cancelAnimationFrame(myRaf);if(ms)ms.getTracks().forEach(t=>t.stop());ms=null}; // マイクと描画を放す（何度呼んでもよい）
+  const stopMeter=()=>{cancelAnimationFrame(myRaf);myRaf=-1}; // メーターの描画を止める
+  const release=()=>{stopMeter();if(ms)ms.getTracks().forEach(t=>t.stop());ms=null}; // マイクと描画を放す（何度呼んでもよい）
   try{
     if(hearing)await $('hearBtn').onclick();
     try{ms=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})}
@@ -420,19 +422,20 @@ $('recBtn').onclick=async()=>{
       $('recBtn').textContent='● 録音';$('recBtn').className='main';$('lvl').style.width='0';$('live').textContent='—';
       const blob=new Blob(chunks,{type:chunks[0]&&chunks[0].type||mr.mimeType||''});
       const hp=myHear?myHear.stop():null,gen=myHear?myHear.gen:lyrGen;if(recHear===myHear)recHear=null;
-      if(!hp)release();
-      const aid=newAudioId(); // この録音の番号（読み出す前に取る）
-      const p=blob.arrayBuffer().then(b=>useBuffer(b,aid)).catch(e=>{if(aid===audioId){loading=false;aiIdleIfFree()}status('録音の読み込みに失敗しました：'+e.message,true)}); // MIDI解析は聞き取りを待たない
+      stopMeter();if(!hp)release();
+      const aid=mr.aid||newAudioId(); // この録音の番号（停止を押した瞬間に取ったもの）
+      const p=blob.arrayBuffer().then(b=>useBuffer(b,aid)).catch(e=>{if(aid===audioId){loading=false;aiIdleIfFree();status('録音の読み込みに失敗しました：'+e.message,true)}return false}); // MIDI解析は聞き取りを待たない
       if(hp){const r=await hp;release(); // 聞き取りが終わったらすぐマイクを放す（かな変換は待たない）
-        await p;
+        const ok=await p;
+        if(!ok){if(aid===audioId)hearSt('録音を読み込めなかったので、聞き取った歌詞は入れていません。',true);return} // 前の音符に今回の歌詞を載せない
         if(r.err&&r.err!=='no-speech'&&!r.text)hearSt(hearErr(r.err),true);else await putLyrics(r.text,emptyMsg(r),gen,aid)}
     };
-    const src=ctx().createMediaStreamSource(ms);an=ctx().createAnalyser();an.fftSize=2048;src.connect(an);
-    const buf=new Float32Array(an.fftSize);
-    const tick=()=>{an.getFloatTimeDomainData(buf);let e=0;for(const v of buf)e+=v*v;const r=Math.sqrt(e/buf.length);
+    const src=ctx().createMediaStreamSource(ms),myAn=ctx().createAnalyser();myAn.fftSize=2048;src.connect(myAn);
+    const buf=new Float32Array(myAn.fftSize);
+    const tick=()=>{if(myRaf<0)return;myAn.getFloatTimeDomainData(buf);let e=0;for(const v of buf)e+=v*v;const r=Math.sqrt(e/buf.length);
       $('lvl').style.width=Math.min(100,r*400)+'%';
       if(r>0.01){const p=Core.yin(buf,0,1024,ctx().sampleRate,65,1100);$('live').textContent=p.f?nn(Math.round(69+12*Math.log2(p.f/440))):'…'}else $('live').textContent='—';
-      myRaf=requestAnimationFrame(tick)};
+      if(myRaf>=0)myRaf=requestAnimationFrame(tick)};
     mr.start();rec=mr;tick();dlog('録音開始 '+(mr.mimeType||'形式不明'));status('録音中… 歌い終わったら「停止」を押してください。');
     if(SR&&$('autoLyr').checked&&(!$('lyr').value.trim()||lyrFromHear)){recHear=myHear=hear(t=>hearSt('聞き取り中：'+t),{track});myHear.gen=lyrGen;hearSt('録音しながら歌詞も聞き取っています…')}
     $('recBtn').textContent='■ 停止';$('recBtn').className='rec';
