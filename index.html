@@ -54,7 +54,7 @@ button:disabled{opacity:.45;cursor:default}
 <body>
 <header>
 <h1>うたいれ</h1>
-<p class="lead"><span class="ver">v4</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
+<p class="lead"><span class="ver">v5</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
 <ol class="steps">
 <li>歌詞を<b>ひらがな</b>で入れる（空のままでも、録音した声から自動で入ります）</li><li>「録音」を押して歌う → 「停止」</li><li>ピアノロールで確認・手直し → 「MIDIを保存」</li>
 </ol>
@@ -249,15 +249,21 @@ for(let p=55;p<=79;p++){const o=document.createElement('option');o.value=p;o.tex
 let audioCtx=null,audio=null,sr=0,F=null,notes=[],sel=-1,hist=[],rec=null,stream=null,an=null,raf=0,player=null;
 const mode=()=>document.querySelector('input[name=mode]:checked').value;
 const ctx=()=>audioCtx||(audioCtx=new (window.AudioContext||window.webkitAudioContext)());
-function status(t,bad){const s=$('st');s.innerHTML=t;s.classList.toggle('bad',!!bad)}
+const esc=t=>String(t).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function status(t,bad,html){const s=$('st');if(html)s.innerHTML=t;else s.textContent=t;s.classList.toggle('bad',!!bad)} // html はアプリが組み立てた文だけ
+// テンポは 40〜240 に収める（空欄やマイナスでも固まらない）
+const tempo=()=>{const v=+$('bpm').value;return !Number.isFinite(v)||v<=0?120:Math.min(240,Math.max(40,v))};
+// ピアノロールの幅がブラウザの上限（約32000px）を超えないよう、長い録音では拡大を自動で抑える
+const pxsNow=()=>{const dur=Math.max(audio?audio.length/sr:4,4);return Math.min(+$('zoom').value,(30000-60)/dur)};
+function updBtns(){['flowBtn','playBtn','saveBtn'].forEach(id=>$(id).disabled=!notes.length)}
 function snap(){hist.push(JSON.stringify(notes));if(hist.length>50)hist.shift();$('undoBtn').disabled=false}
 function flow(){const r=Core.toMora($('lyr').value);notes.forEach((n,i)=>n.lyric=r.mora[i]||'-');return r}
 function report(){
   const r=Core.toMora($('lyr').value),m=r.mora.length,n=notes.length;
   let t=`音符 <b>${n}</b> 個 ／ 歌詞 <b>${m}</b> 音`;
   if(m&&n!==m)t+=n>m?`。音符が ${n-m} 個多いので、余りは「-」（前の音をのばす）にしました。不要な音符は「前とつなぐ」で減らせます。`:`。歌詞が ${m-n} 音余っています。歌い直すか、長い音符を「半分に分ける」で増やしてください。`;
-  if(r.bad)t+=`<br><span class="bad">ひらがなでない文字があります：${r.bad.slice(0,10)}（漢字はひらがなに直してください）</span>`;
-  status(t,false);
+  if(r.bad)t+=`<br><span class="bad">ひらがなでない文字があります：${esc(r.bad.slice(0,10))}（漢字はひらがなに直してください）</span>`;
+  status(t,false,true);
 }
 function analyze(){
   if(!audio)return;
@@ -272,10 +278,16 @@ function analyze(){
   },20);
 }
 let audioId=0; // 音声を読み込むたびに増やす。古い処理の結果が新しい音声に混ざらないようにする
-async function useBuffer(buf){
-  const my=++audioId;
-  const ab=await ctx().decodeAudioData(buf);
+let loading=false;
+function newAudioId(){audioId++;loading=true;$('aiBtn').disabled=true;return audioId} // 録音停止・ファイル選択の瞬間に呼ぶ
+async function useBuffer(buf,my){
+  if(my===undefined)my=newAudioId();
+  if(my!==audioId)return; // もっと新しい音声が頼まれている
+  let ab;
+  try{ab=await ctx().decodeAudioData(buf)}
+  catch(e){if(my===audioId){loading=false;if(!asrRun)$('aiBtn').disabled=!audio}throw e}
   if(my!==audioId)return; // 後から選んだ音声のほうを優先
+  loading=false;
   sr=ab.sampleRate;const c0=ab.getChannelData(0);
   if(ab.numberOfChannels>1){const c1=ab.getChannelData(1);audio=new Float32Array(c0.length);for(let i=0;i<c0.length;i++)audio[i]=(c0[i]+c1[i])/2}else audio=c0.slice();
   F=null;analyze();if(!asrRun)$('aiBtn').disabled=false;
@@ -284,7 +296,7 @@ async function useBuffer(buf){
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
 const isIOS=/iPhone|iPad|iPod/i.test(navigator.userAgent)||(navigator.maxTouchPoints>1&&/Mac/.test(navigator.userAgent));
 const isMobile=isIOS||/Android/i.test(navigator.userAgent);
-let hearing=null,hearBusy=false,lyrFromHear=false,lyrGen=0,cand='';
+let hearing=null,hearBusy=false,lyrFromHear=false,lyrGen=0,cand='',candAid;
 const hearSt=(t,bad)=>{$('hearSt').textContent=t;$('hearSt').classList.toggle('bad',!!bad)};
 if(!SR){$('hearRow').style.display='none';hearSt('このブラウザは「声で歌詞を入れる」に対応していません。録音のあと「🤖 AIで歌詞を起こす」を使ってください。')}
 else if(isMobile){$('autoLyr').checked=false;hearSt('スマホでは録音と同時の聞き取りがうまく動かないことが多いので、最初はオフにしています。「🎤 声で歌詞を入れる」で読み上げるか、録音のあと「🤖 AIで歌詞を起こす」を使ってください。')}
@@ -303,7 +315,7 @@ function hear(onText,opt={}){ // 止めるまで聞き続ける（途中で切�
     const s=r=new SR();s.lang='ja-JP';s.continuous=true;s.interimResults=true;tries++;let gotResult=false;
     s.onstart=()=>{if(s===r&&!ended)L('start')};
     s.onaudiostart=()=>{if(s!==r||ended)return;heard=true;L('audiostart');opt.onReady&&opt.onReady()};
-    s.onspeechstart=()=>{if(s===r)L('speechstart')};
+    s.onspeechstart=()=>{if(s===r&&!ended)L('speechstart')};
     s.onresult=e=>{if(s!==r||ended)return;gotResult=true;quiet=0; // 毎回そのセッションの結果を最初から組み立て直す（足し続けない＝重複しない）
       let f='',t='';for(let i=0;i<e.results.length;i++){const x=e.results[i];if(x.isFinal)f+=x[0].transcript;else t+=x[0].transcript}
       fin=f;tmp=t;L(`result 確定${f.length}字 途中${t.length}字`);onText&&onText((got+fin+tmp).trim())};
@@ -345,13 +357,13 @@ function toKana(text){
   if(/^[\sぁ-ゖァ-ヶー、。！？!?]*$/.test(text))return Promise.resolve(text);
   return new Promise((res,rej)=>{
     if(!kanaW){
-      try{kanaW=new Worker(URL.createObjectURL(new Blob([KANA_WORKER],{type:'text/javascript'})))}catch(e){rej(e);return}
+      const u=URL.createObjectURL(new Blob([KANA_WORKER],{type:'text/javascript'}));try{kanaW=new Worker(u)}catch(e){rej(e);return}finally{setTimeout(()=>URL.revokeObjectURL(u),1000)}
       const fail=msg=>{Object.values(kanaWait).forEach(p=>p.rej(new Error(msg)));for(const k in kanaWait)delete kanaWait[k];kanaW&&kanaW.terminate();kanaW=null};
       kanaW.onmessage=e=>{const d=e.data;if(d.err){fail(d.err);return}const p=kanaWait[d.id];if(p){delete kanaWait[d.id];p.res(d.kana)}};
       kanaW.onerror=e=>{e.preventDefault();fail('辞書を読み込めませんでした')};
     }
     const id=++kanaId;
-    const timer=setTimeout(()=>{if(kanaWait[id]){delete kanaWait[id];rej(new Error('時間切れ'))}},60000);
+    const timer=setTimeout(()=>{if(kanaWait[id]){delete kanaWait[id];if(kanaW){kanaW.terminate();kanaW=null}rej(new Error('時間切れ'))}},60000);
     kanaWait[id]={res:v=>{clearTimeout(timer);res(v)},rej:e=>{clearTimeout(timer);rej(e)}};
     kanaW.postMessage({id,text});
   });
@@ -367,12 +379,12 @@ async function putLyrics(text,emptyText,gen,aid){ // gen=聞き取りを始め�
   try{kana=await toKana(text)}catch(e){note='（ひらがなにできなかったので、そのまま入れました。漢字を直してください）'}
   if(aid!==undefined&&aid!==audioId){cand='';hearSt('前の音声の聞き取り結果は、今の音声とちがうので入れませんでした。');return}
   if(gen!==lyrGen){ // 聞き取りの間に歌詞欄が手で直されたら、上書きせず候補として見せる
-    cand=kana;hearSt('聞き取った歌詞の候補：「'+kana+'」（歌詞欄が編集されていたので入れていません）');$('useCand').hidden=false;return}
+    cand=kana;candAid=aid;hearSt('聞き取った歌詞の候補：「'+kana+'」（歌詞欄が編集されていたので入れていません）');$('useCand').hidden=false;return}
   setLyrics(kana);
   hearSt('聞き取った文字：「'+text+'」'+note+'　まちがいは上の欄で直せます。',!!note);
 }
 function setLyrics(kana){$('lyr').value=kana;lyrFromHear=true;lyrGen++;cand='';$('useCand').hidden=true;if(notes.length){flow();report();draw();selUI()}}
-$('useCand').onclick=()=>{if(cand){setLyrics(cand);hearSt('候補の歌詞を入れました。')}};
+$('useCand').onclick=()=>{if(!cand)return;if(candAid!==undefined&&candAid!==audioId){cand='';$('useCand').hidden=true;hearSt('この候補は前の音声のものなので使えません。',true);return}setLyrics(cand);hearSt('候補の歌詞を入れました。')};
 $('hearBtn').onclick=async()=>{
   if(rec||recBusy||hearBusy)return;
   if(hearing){hearBusy=true;$('hearBtn').disabled=true;$('hearBtn').textContent='止めています…';
@@ -392,8 +404,8 @@ let recHear=null,recBusy=false;
 $('recBtn').onclick=async()=>{
   if(rec){if(rec.state==='recording'){recHear&&recHear.stop();rec.stop()}return} // 先に聞き取りを止めてから録音を止める
   if(recBusy||hearBusy)return;recBusy=true;
-  let ms=null,mr=null,myHear=null;
-  const release=()=>{cancelAnimationFrame(raf);if(ms)ms.getTracks().forEach(t=>t.stop());ms=null}; // マイクと描画を放す（何度呼んでもよい）
+  let ms=null,mr=null,myHear=null,myRaf=0;
+  const release=()=>{cancelAnimationFrame(myRaf);if(ms)ms.getTracks().forEach(t=>t.stop());ms=null}; // マイクと描画を放す（何度呼んでもよい）
   try{
     if(hearing)await $('hearBtn').onclick();
     try{ms=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})}
@@ -409,8 +421,8 @@ $('recBtn').onclick=async()=>{
       const blob=new Blob(chunks,{type:chunks[0]&&chunks[0].type||mr.mimeType||''});
       const hp=myHear?myHear.stop():null,gen=myHear?myHear.gen:lyrGen;if(recHear===myHear)recHear=null;
       if(!hp)release();
-      const p=useBuffer(await blob.arrayBuffer()).catch(e=>status('録音の読み込みに失敗しました：'+e.message,true)); // MIDI解析は聞き取りを待たない
-      const aid=audioId; // useBuffer が同期的に番号を進めているので、これがこの録音の番号
+      const aid=newAudioId(); // この録音の番号（読み出す前に取る）
+      const p=blob.arrayBuffer().then(b=>useBuffer(b,aid)).catch(e=>{if(aid===audioId){loading=false;aiIdleIfFree()}status('録音の読み込みに失敗しました：'+e.message,true)}); // MIDI解析は聞き取りを待たない
       if(hp){const r=await hp;release(); // 聞き取りが終わったらすぐマイクを放す（かな変換は待たない）
         await p;
         if(r.err&&r.err!=='no-speech'&&!r.text)hearSt(hearErr(r.err),true);else await putLyrics(r.text,emptyMsg(r),gen,aid)}
@@ -420,7 +432,7 @@ $('recBtn').onclick=async()=>{
     const tick=()=>{an.getFloatTimeDomainData(buf);let e=0;for(const v of buf)e+=v*v;const r=Math.sqrt(e/buf.length);
       $('lvl').style.width=Math.min(100,r*400)+'%';
       if(r>0.01){const p=Core.yin(buf,0,1024,ctx().sampleRate,65,1100);$('live').textContent=p.f?nn(Math.round(69+12*Math.log2(p.f/440))):'…'}else $('live').textContent='—';
-      raf=requestAnimationFrame(tick)};
+      myRaf=requestAnimationFrame(tick)};
     mr.start();rec=mr;tick();dlog('録音開始 '+(mr.mimeType||'形式不明'));status('録音中… 歌い終わったら「停止」を押してください。');
     if(SR&&$('autoLyr').checked&&(!$('lyr').value.trim()||lyrFromHear)){recHear=myHear=hear(t=>hearSt('聞き取り中：'+t),{track});myHear.gen=lyrGen;hearSt('録音しながら歌詞も聞き取っています…')}
     $('recBtn').textContent='■ 停止';$('recBtn').className='rec';
@@ -448,7 +460,7 @@ self.onmessage=async e=>{const {model,pcm}=e.data;
 let asrW=null,asrRun=null; // asrRun：いま動いているAIの1回分（中止の印を持つ）
 function asrKill(){if(asrW){asrW.terminate();asrW=null}}
 function asrWorker(){
-  if(!asrW){const u=URL.createObjectURL(new Blob([ASR_WORKER],{type:'text/javascript'}));asrW=new Worker(u,{type:'module'});setTimeout(()=>URL.revokeObjectURL(u),60000)}
+  if(!asrW){const u=URL.createObjectURL(new Blob([ASR_WORKER],{type:'text/javascript'}));try{asrW=new Worker(u,{type:'module'})}finally{setTimeout(()=>URL.revokeObjectURL(u),1000)}}
   return asrW;
 }
 async function to16k(){ // 解析に使った音をそのまま16kHzモノラルにする
@@ -456,45 +468,46 @@ async function to16k(){ // 解析に使った音をそのまま16kHzモノラル
   b.copyToChannel(audio,0);const s=oc.createBufferSource();s.buffer=b;s.connect(oc.destination);s.start();
   return (await oc.startRendering()).getChannelData(0).slice();
 }
-function aiIdle(){$('aiBtn').textContent='🤖 AIで歌詞を起こす';$('aiBtn').disabled=!audio}
+function aiIdleIfFree(){if(!asrRun)$('aiBtn').disabled=!audio||loading}
+function aiIdle(){$('aiBtn').textContent='🤖 AIで歌詞を起こす';$('aiBtn').disabled=!audio||loading}
 $('aiBtn').onclick=async()=>{
   if(asrRun){asrRun.cancel();return} // 実行中なら中止
-  if(!audio)return;
+  if(!audio||loading)return;
   const secs=audio.length/sr;
   if(secs>180){hearSt('AIで起こせるのは3分までです。短く録り直すか、短いファイルを使ってください。',true);return}
   const model=$('aiModel').value,gen=lyrGen,aid=audioId,t0=performance.now();
   let reject=null;
-  const run=asrRun={cancelled:false,cancel(){this.cancelled=true;asrKill();reject&&reject(new Error('中止'))}};
+  const run=asrRun={cancelled:false,wd:0,cancel(){this.cancelled=true;clearTimeout(this.wd);asrKill();reject&&reject(new Error('中止'))}};
   $('aiBtn').textContent='■ 中止';hearSt('準備中…');dlog(`AI 開始 ${model.split('/')[1]} ${secs.toFixed(1)}秒`);
   try{
     const pcm=await to16k();
     if(run.cancelled)throw new Error('中止');
     const w=asrWorker(),files={};
     const text=await new Promise((res,rej)=>{
-      reject=rej;let wd=0;
-      const watch=ms=>{clearTimeout(wd);wd=setTimeout(()=>{asrKill();rej(new Error('時間がかかりすぎたので止めました'))},ms)};
+      reject=rej;
+      const watch=ms=>{clearTimeout(run.wd);run.wd=setTimeout(()=>{if(asrW===w)asrKill();rej(new Error('時間がかかりすぎたので止めました'))},ms)};
       watch(180000); // 読み込み中は進みが3分止まったら打ち切り
       w.onmessage=e=>{const d=e.data;
         if(d.type==='dl'){watch(180000);files[d.file]=[d.loaded||0,d.total||0];let a=0,b=0;for(const k in files){a+=files[k][0];b+=files[k][1]}
           hearSt(`AIのモデルを読み込み中… ${(a/1e6).toFixed(0)} / ${(b/1e6).toFixed(0)} MB（初回だけ。2回目からは早くなります）`)}
         else if(d.type==='run'){watch(Math.max(120000,secs*20000));dlog(`AI モデル準備OK ${((performance.now()-t0)/1000).toFixed(1)}s`);hearSt('AIが文字にしています…（長い録音ほど時間がかかります）')}
-        else if(d.type==='done'){clearTimeout(wd);res(d.text)}
-        else if(d.type==='err'){clearTimeout(wd);rej(new Error(d.msg))}};
-      w.onmessageerror=()=>{clearTimeout(wd);rej(new Error('AIとのやりとりに失敗しました'))};
-      w.onerror=e=>{e.preventDefault();clearTimeout(wd);asrKill();rej(new Error(e.message||'AIを読み込めませんでした'))};
+        else if(d.type==='done'){clearTimeout(run.wd);res(d.text)}
+        else if(d.type==='err'){clearTimeout(run.wd);rej(new Error(d.msg))}};
+      w.onmessageerror=()=>{clearTimeout(run.wd);rej(new Error('AIとのやりとりに失敗しました'))};
+      w.onerror=e=>{e.preventDefault();clearTimeout(run.wd);asrKill();rej(new Error(e.message||'AIを読み込めませんでした'))};
       w.postMessage({model,pcm},[pcm.buffer]);
     });
     dlog(`AI おわり ${((performance.now()-t0)/1000).toFixed(1)}s ${text.trim().length}字`);
-    if(asrRun===run){asrRun=null;aiIdle()}
-    const clean=text.replace(/[(（\[［【][^)）\]］】]*[)）\]］】]/g,'').replace(/[♪♫〜~]/g,'').trim(); // 「(音楽)」「[拍手]」などは歌詞ではないので消す
+    clearTimeout(run.wd);if(asrRun===run){asrRun=null;aiIdle()}
+    const clean=text.replace(/[(（\[［【]\s*(音楽|拍手|笑|笑い|歓声|BGM|music|Music|MUSIC|applause|Applause|laughs?|Laughs?)\s*[)）\]］】]/g,'').replace(/[♪♫]/g,'').trim(); // 「(音楽)」「[拍手]」などの決まった注記だけ消す
     await putLyrics(clean,'AIでも声を文字にできませんでした。マイクに近づいて、伴奏なしで録ってみてください。',gen,aid);
   }catch(e){
-    if(asrRun===run){asrRun=null;aiIdle()}
+    clearTimeout(run.wd);if(asrRun===run){asrRun=null;aiIdle()}
     if(e.message==='中止'){dlog('AI 中止');hearSt('AIの文字起こしを中止しました。');return}
     dlog('AI エラー '+e.message);asrKill();
     hearSt('AIの文字起こしに失敗しました：'+e.message+'（ネット接続とメモリの空きを確認してください）',true)}
 };
-$('file').onchange=async e=>{const f=e.target.files[0];if(!f)return;status('読み込み中…');try{await useBuffer(await f.arrayBuffer())}catch(err){status('このファイルは読み込めませんでした（'+err.message+'）。WAVやMP3で試してください。',true)}};
+$('file').onchange=async e=>{const f=e.target.files[0];if(!f)return;status('読み込み中…');const my=newAudioId();try{await useBuffer(await f.arrayBuffer(),my)}catch(err){if(my===audioId){loading=false;aiIdleIfFree()}status('このファイルは読み込めませんでした（'+err.message+'）。WAVやMP3で試してください。',true)}};
 $('reBtn').onclick=analyze;
 $('diagCopy').onclick=async()=>{const t=navigator.userAgent+'\n'+diag.join('\n');try{await navigator.clipboard.writeText(t);$('diagCopy').textContent='コピーしました'}catch(e){$('diagCopy').textContent='コピーできませんでした'}setTimeout(()=>$('diagCopy').textContent='記録をコピー',2000)};
 document.querySelectorAll('input[name=mode]').forEach(r=>r.onchange=()=>{$('fixw').style.opacity=mode()==='speak'?1:.5;if(audio)analyze()});
@@ -502,10 +515,12 @@ $('fixw').style.opacity=.5;
 $('flowBtn').onclick=()=>{snap();flow();report();draw();selUI()};
 $('lyr').oninput=()=>{lyrFromHear=false;lyrGen++;if(notes.length){flow();report();draw();selUI()}};
 ['bpm','q','zoom'].forEach(id=>$(id).oninput=()=>draw());
+$('bpm').onchange=()=>{$('bpm').value=tempo();draw()}; // 入力を終えたら範囲内の数に直す
 // ---- 試聴 ----
 function stopPlay(){if(player){player.forEach(o=>{try{o.stop()}catch(e){}});player=null}}
 $('playBtn').onclick=()=>{
-  stopPlay();const c=ctx(),t0=c.currentTime+0.1,bpm=+$('bpm').value||120,tn=Core.toTicks(notes,bpm,+$('q').value,$('legato').checked),sp=60/bpm/480;
+  if(!notes.length)return;
+  stopPlay();const c=ctx(),t0=c.currentTime+0.1,bpm=tempo(),tn=Core.toTicks(notes,bpm,+$('q').value,$('legato').checked),sp=60/bpm/480;
   player=tn.map(n=>{const o=c.createOscillator(),g=c.createGain();o.type='triangle';o.frequency.value=440*2**((n.pitch-69)/12);
     const a=t0+(n.s-1920)*sp,b=t0+(n.e-1920)*sp;g.gain.setValueAtTime(0,a);g.gain.linearRampToValueAtTime(0.25,a+0.02);g.gain.setValueAtTime(0.25,Math.max(a+0.02,b-0.03));g.gain.linearRampToValueAtTime(0,b);
     o.connect(g).connect(c.destination);o.start(a);o.stop(b+0.02);return o});
@@ -513,7 +528,8 @@ $('playBtn').onclick=()=>{
 $('origBtn').onclick=()=>{stopPlay();const c=ctx(),b=c.createBuffer(1,audio.length,sr);b.copyToChannel(audio,0);const s=c.createBufferSource();s.buffer=b;s.connect(c.destination);s.start();player=[s]};
 // ---- 保存 ----
 $('saveBtn').onclick=async()=>{
-  const bpm=+$('bpm').value||120,tn=Core.toTicks(notes,bpm,+$('q').value,$('legato').checked);
+  if(!notes.length){status('音符がないので保存できません。',true);return}
+  const bpm=tempo(),tn=Core.toTicks(notes,bpm,+$('q').value,$('legato').checked);
   const d=new Date(),name=`utaire_${d.getMonth()+1}${String(d.getDate()).padStart(2,'0')}_${String(d.getHours()).padStart(2,'0')}${String(d.getMinutes()).padStart(2,'0')}.mid`;
   const blob=new Blob([Core.midiBytes(tn,bpm)],{type:'audio/midi'});
   const mobile=/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)||(navigator.maxTouchPoints>1&&/Mac/.test(navigator.userAgent));
@@ -527,13 +543,13 @@ $('saveBtn').onclick=async()=>{
 const cv=$('cv'),g=cv.getContext('2d'),RH=16;let lo=55,hi=79;
 const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||'#888';
 function draw(){
-  const pxs=+$('zoom').value,dur=Math.max(audio?audio.length/sr:4,4);
+  const pxs=pxsNow(),dur=Math.max(audio?audio.length/sr:4,4);
   const ps=notes.map(n=>n.pitch);lo=Math.min(55,...ps)-2;hi=Math.max(72,...ps)+2;
   const W=Math.ceil(dur*pxs)+60,H=(hi-lo+1)*RH;cv.width=W;cv.height=H;
   g.fillStyle=css('--key');g.fillRect(0,0,W,H);
   for(let p=lo;p<=hi;p++){const y=(hi-p)*RH;if([1,3,6,8,10].includes(p%12)){g.fillStyle=css('--line');g.globalAlpha=.5;g.fillRect(0,y,W,RH);g.globalAlpha=1}
     if(p%12===0){g.fillStyle=css('--sub');g.font='11px sans-serif';g.fillText(nn(p),4,y+12)}}
-  const bpm=+$('bpm').value||120,beat=60/bpm;g.strokeStyle=css('--line');
+  const bpm=tempo(),beat=60/bpm;g.strokeStyle=css('--line');
   for(let t=0,k=0;t<dur;t+=beat,k++){g.globalAlpha=k%4?0.5:1;g.beginPath();g.moveTo(40+t*pxs,0);g.lineTo(40+t*pxs,H);g.stroke()}g.globalAlpha=1;
   if(F){g.strokeStyle=css('--sub');g.lineWidth=1.5;g.beginPath();let on=false;
     F.fr.forEach(f=>{if(isNaN(f.midi)||f.rms<0.006){on=false;return}const x=40+f.t*pxs,y=(hi-f.midi+0.5)*RH;on?g.lineTo(x,y):g.moveTo(x,y);on=true});g.stroke()}
@@ -542,20 +558,20 @@ function draw(){
     g.fillStyle='#fff';g.font='bold 12px sans-serif';g.fillText(n.lyric,x+3,y+12);
     if(i===sel){g.strokeStyle=css('--ink');g.lineWidth=2;g.strokeRect(x,y+1,w,RH-2)}});
 }
-cv.onclick=e=>{const r=cv.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top,pxs=+$('zoom').value;
+cv.onclick=e=>{const r=cv.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top,pxs=pxsNow();
   sel=notes.findIndex(n=>x>=40+n.start*pxs&&x<=40+n.end*pxs+2&&Math.abs((hi-n.pitch)*RH+RH/2-y)<=RH/2+2);draw();selUI()};
 function selUI(){const on=sel>=0&&notes[sel];['selLyric','upBtn','dnBtn','mPrev','mNext','splitBtn','delBtn'].forEach(id=>$(id).disabled=!on);
   if(!on){$('selInfo').textContent='音符が選ばれていません';$('selLyric').value='';return}
   const n=notes[sel];$('selInfo').textContent=`${sel+1}番目：${nn(n.pitch)}・${(n.end-n.start).toFixed(2)}秒`;$('selLyric').value=n.lyric;
   $('mPrev').disabled=sel===0;$('mNext').disabled=sel===notes.length-1}
-const act=f=>()=>{if(sel<0)return;snap();f();draw();selUI()};
+const act=f=>()=>{if(sel<0)return;snap();f();if(notes.length)report();else status('音符がありません。');updBtns();draw();selUI()};
 $('selLyric').onchange=act(()=>{notes[sel].lyric=$('selLyric').value.trim()||'-';lyrGen++});
-$('upBtn').onclick=act(()=>notes[sel].pitch++);$('dnBtn').onclick=act(()=>notes[sel].pitch--);
+$('upBtn').onclick=act(()=>notes[sel].pitch=Math.min(127,notes[sel].pitch+1));$('dnBtn').onclick=act(()=>notes[sel].pitch=Math.max(0,notes[sel].pitch-1));
 $('mPrev').onclick=act(()=>{const p=notes[sel-1];p.end=notes[sel].end;notes.splice(sel,1);sel--});
 $('mNext').onclick=act(()=>{const n=notes[sel+1];notes[sel].end=n.end;notes.splice(sel+1,1)});
 $('splitBtn').onclick=act(()=>{const n=notes[sel],m=(n.start+n.end)/2;notes.splice(sel+1,0,{start:m,end:n.end,pitch:n.pitch,lyric:'-'});n.end=m});
 $('delBtn').onclick=act(()=>{notes.splice(sel,1);sel=Math.min(sel,notes.length-1)});
-$('undoBtn').onclick=()=>{if(!hist.length)return;notes=JSON.parse(hist.pop());sel=-1;$('undoBtn').disabled=!hist.length;draw();selUI()};
+$('undoBtn').onclick=()=>{if(!hist.length)return;notes=JSON.parse(hist.pop());sel=-1;lyrGen++;$('undoBtn').disabled=!hist.length;if(notes.length)report();updBtns();draw();selUI()};
 document.addEventListener('keydown',e=>{if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||sel<0)return;
   if(e.key==='ArrowUp'){e.preventDefault();$('upBtn').click()}else if(e.key==='ArrowDown'){e.preventDefault();$('dnBtn').click()}else if(e.key==='Delete'||e.key==='Backspace'){e.preventDefault();$('delBtn').click()}});
 new MutationObserver(draw).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
