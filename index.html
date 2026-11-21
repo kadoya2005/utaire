@@ -486,7 +486,8 @@ $('aiBtn').onclick=async()=>{
     });
     dlog(`AI おわり ${((performance.now()-t0)/1000).toFixed(1)}s ${text.trim().length}字`);
     if(asrRun===run){asrRun=null;aiIdle()}
-    await putLyrics(text,'AIでも声を文字にできませんでした。マイクに近づいて、伴奏なしで録ってみてください。',gen,aid);
+    const clean=text.replace(/[(（\[［【][^)）\]］】]*[)）\]］】]/g,'').replace(/[♪♫〜~]/g,'').trim(); // 「(音楽)」「[拍手]」などは歌詞ではないので消す
+    await putLyrics(clean,'AIでも声を文字にできませんでした。マイクに近づいて、伴奏なしで録ってみてください。',gen,aid);
   }catch(e){
     if(asrRun===run){asrRun=null;aiIdle()}
     if(e.message==='中止'){dlog('AI 中止');hearSt('AIの文字起こしを中止しました。');return}
