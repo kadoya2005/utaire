@@ -54,15 +54,20 @@ button:disabled{opacity:.45;cursor:default}
 <body>
 <header>
 <h1>うたいれ</h1>
-<p class="lead"><span class="ver">v2</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
+<p class="lead"><span class="ver">v3</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
 <ol class="steps">
-<li>歌詞を<b>ひらがな</b>で入れる</li><li>「録音」を押して歌う → 「停止」</li><li>ピアノロールで確認・手直し → 「MIDIを保存」</li>
+<li>歌詞を<b>ひらがな</b>で入れる（空のままでも、録音した声から自動で入ります）</li><li>「録音」を押して歌う → 「停止」</li><li>ピアノロールで確認・手直し → 「MIDIを保存」</li>
 </ol>
 </header>
 <main>
 <section class="card">
 <label for="lyr">歌詞（ひらがな・カタカナ。のばす音は「ー」）</label>
 <textarea id="lyr" placeholder="例：きらきらひかるおそらのほしよ"></textarea>
+<div class="row" id="hearRow" style="margin-top:6px">
+<label><input type="checkbox" id="autoLyr" checked> 録音中に声から歌詞を聞き取る</label>
+<button id="hearBtn">🎤 声で歌詞を入れる</button>
+</div>
+<p class="status" id="hearSt" style="margin:4px 0 0"></p>
 <div class="row" style="margin-top:8px">
 <div class="mode">
 <label><input type="radio" name="mode" value="sing" checked> 歌（高さ＋長さ）</label>
@@ -263,9 +268,72 @@ async function useBuffer(buf){
   if(ab.numberOfChannels>1){const c1=ab.getChannelData(1);audio=new Float32Array(c0.length);for(let i=0;i<c0.length;i++)audio[i]=(c0[i]+c1[i])/2}else audio=c0.slice();
   F=null;analyze();
 }
+// ---- 声から歌詞（ブラウザの音声認識 → 辞書でひらがなに）----
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+const isIOS=/iPhone|iPad|iPod/i.test(navigator.userAgent)||(navigator.maxTouchPoints>1&&/Mac/.test(navigator.userAgent));
+let hearing=null,lyrFromHear=false;
+const hearSt=(t,bad)=>{$('hearSt').textContent=t;$('hearSt').classList.toggle('bad',!!bad)};
+if(!SR){$('hearRow').style.display='none';hearSt('このブラウザは声から歌詞を入れる機能に対応していません（Chrome・Edge・Safariで使えます）。')}
+else if(isIOS){$('autoLyr').checked=false;hearSt('iPhone・iPadでは、録音と同時に聞き取ると止まることがあります。先に「声で歌詞を入れる」で歌詞を入れてから録音してください。')}
+function hear(onText){ // 止めるまで聞き続ける（途中で切れたら自動でつなぎ直す）
+  let fin='',want=true,err='',r,resolve;const done=new Promise(res=>resolve=res);
+  const go=()=>{r=new SR();r.lang='ja-JP';r.continuous=true;r.interimResults=true;
+    r.onresult=e=>{let tmp='';for(let i=e.resultIndex;i<e.results.length;i++){const x=e.results[i];if(x.isFinal)fin+=x[0].transcript;else tmp+=x[0].transcript}onText&&onText(fin+tmp)};
+    r.onerror=e=>{if(e.error!=='no-speech'&&e.error!=='aborted'){err=e.error;want=false}};
+    r.onend=()=>{if(want){try{go()}catch(e){resolve({text:fin,err:e.message})}}else resolve({text:fin,err})};
+    r.start()};
+  try{go()}catch(e){want=false;resolve({text:'',err:e.message})}
+  return {stop(){want=false;try{r.stop()}catch(e){}return Promise.race([done,new Promise(res=>setTimeout(()=>res({text:fin,err}),4000))])}};
+}
+function hearErr(err){return {'not-allowed':'音声認識が許可されていません。ブラウザの設定でマイクを許可してください。','service-not-allowed':'音声認識が使えません（iPhoneは「設定」→「Siri」と「音声入力」をオンにしてください）。','network':'音声認識にはネット接続が必要です。','audio-capture':'マイクを音声認識に使えませんでした。'}[err]||('聞き取りに失敗しました（'+err+'）')}
+// 読み方の辞書（約17MB・初回だけ読み込む）は、画面が固まらないよう裏の Worker で動かす
+const KURO='https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/';
+const KANA_WORKER=`importScripts('${KURO}build/kuromoji.js');
+let tok=null,wait=[];
+kuromoji.builder({dicPath:'${KURO}dict/'}).build((e,t)=>{if(e){postMessage({err:String(e)});close();return}tok=t;wait.forEach(run);wait=[]});
+function run(m){postMessage({id:m.id,kana:tok.tokenize(m.text).map(k=>{
+  if(k.pos==='助詞'&&k.surface_form==='は')return 'わ';
+  if(k.pos==='助詞'&&k.surface_form==='へ')return 'え';
+  return k.reading&&k.reading!=='*'?k.reading:k.surface_form;
+}).join('').replace(/[ァ-ヶ]/g,c=>String.fromCharCode(c.charCodeAt(0)-0x60))})}
+onmessage=e=>tok?run(e.data):wait.push(e.data);`;
+let kanaW=null,kanaId=0;const kanaWait={};
+function toKana(text){
+  if(/^[\sぁ-ゖァ-ヶー、。！？!?]*$/.test(text))return Promise.resolve(text);
+  return new Promise((res,rej)=>{
+    if(!kanaW){
+      try{kanaW=new Worker(URL.createObjectURL(new Blob([KANA_WORKER],{type:'text/javascript'})))}catch(e){rej(e);return}
+      const fail=msg=>{Object.values(kanaWait).forEach(p=>p.rej(new Error(msg)));for(const k in kanaWait)delete kanaWait[k];kanaW&&kanaW.terminate();kanaW=null};
+      kanaW.onmessage=e=>{const d=e.data;if(d.err){fail(d.err);return}const p=kanaWait[d.id];if(p){delete kanaWait[d.id];p.res(d.kana)}};
+      kanaW.onerror=e=>{e.preventDefault();fail('辞書を読み込めませんでした')};
+    }
+    const id=++kanaId;
+    const timer=setTimeout(()=>{if(kanaWait[id]){delete kanaWait[id];rej(new Error('時間切れ'))}},60000);
+    kanaWait[id]={res:v=>{clearTimeout(timer);res(v)},rej:e=>{clearTimeout(timer);rej(e)}};
+    kanaW.postMessage({id,text});
+  });
+}
+async function putLyrics(text){
+  text=text.trim();
+  if(!text){hearSt('声を聞き取れませんでした。はっきり、ゆっくり言ってみてください。',true);return}
+  hearSt('「'+text+'」をひらがなにしています…（初回は辞書の読み込みに少し時間がかかります）');
+  let kana=text,note='';
+  try{kana=await toKana(text)}catch(e){note='（ひらがなにできなかったので、そのまま入れました。漢字を直してください）'}
+  $('lyr').value=kana;lyrFromHear=true;
+  hearSt('聞き取った文字：「'+text+'」'+note+'　まちがいは上の欄で直せます。',!!note);
+  if(notes.length){flow();report();draw();selUI()}
+}
+$('hearBtn').onclick=async()=>{
+  if(rec)return;
+  if(hearing){const h=hearing;hearing=null;$('hearBtn').textContent='🎤 声で歌詞を入れる';const r=await h.stop();if(r.err){hearSt(hearErr(r.err),true);return}await putLyrics(r.text);return}
+  hearing=hear(t=>hearSt('聞き取り中：'+t));
+  $('hearBtn').textContent='■ 聞き取りをやめる';hearSt('歌詞を言ってください。言い終わったら「聞き取りをやめる」を押します。');
+};
 // ---- 録音 ----
 $('recBtn').onclick=async()=>{
   if(rec){rec.stop();return}
+  if(hearing)await $('hearBtn').onclick();
+  let recHear=null;
   try{
     stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
   }catch(e){status(location.protocol==='https:'||location.hostname==='localhost'?'マイクを使えませんでした。ブラウザの設定でこのサイトのマイクを許可してください。':'マイクは https:// のページでしか使えません。GitHub Pagesなどに置いて開いてください。',true);return}
@@ -276,6 +344,7 @@ $('recBtn').onclick=async()=>{
     cancelAnimationFrame(raf);stream.getTracks().forEach(t=>t.stop());rec=null;
     $('recBtn').textContent='● 録音';$('recBtn').className='main';$('lvl').style.width='0';$('live').textContent='—';
     const blob=new Blob(chunks,{type:chunks[0]&&chunks[0].type||'audio/webm'});
+    if(recHear){const r=await recHear.stop();recHear=null;if(r.err&&!r.text)hearSt(hearErr(r.err),true);else await putLyrics(r.text)}
     try{await useBuffer(await blob.arrayBuffer())}catch(e){status('録音の読み込みに失敗しました：'+e.message,true)}
   };
   const src=ctx().createMediaStreamSource(stream);an=ctx().createAnalyser();an.fftSize=2048;src.connect(an);
@@ -285,6 +354,7 @@ $('recBtn').onclick=async()=>{
     if(r>0.01){const p=Core.yin(buf,0,1024,ctx().sampleRate,65,1100);$('live').textContent=p.f?nn(Math.round(69+12*Math.log2(p.f/440))):'…'}else $('live').textContent='—';
     raf=requestAnimationFrame(tick)};
   tick();rec.start();status('録音中… 歌い終わったら「停止」を押してください。');
+  if(SR&&$('autoLyr').checked&&(!$('lyr').value.trim()||lyrFromHear)){recHear=hear(t=>hearSt('聞き取り中：'+t));hearSt('録音しながら歌詞も聞き取っています…')}
   $('recBtn').textContent='■ 停止';$('recBtn').className='rec';
 };
 $('file').onchange=async e=>{const f=e.target.files[0];if(!f)return;status('読み込み中…');try{await useBuffer(await f.arrayBuffer())}catch(err){status('このファイルは読み込めませんでした（'+err.message+'）。WAVやMP3で試してください。',true)}};
@@ -292,7 +362,7 @@ $('reBtn').onclick=analyze;
 document.querySelectorAll('input[name=mode]').forEach(r=>r.onchange=()=>{$('fixw').style.opacity=mode()==='speak'?1:.5;if(audio)analyze()});
 $('fixw').style.opacity=.5;
 $('flowBtn').onclick=()=>{snap();flow();report();draw();selUI()};
-$('lyr').oninput=()=>{if(notes.length){flow();report();draw();selUI()}};
+$('lyr').oninput=()=>{lyrFromHear=false;if(notes.length){flow();report();draw();selUI()}};
 ['bpm','q','zoom'].forEach(id=>$(id).oninput=()=>draw());
 // ---- 試聴 ----
 function stopPlay(){if(player){player.forEach(o=>{try{o.stop()}catch(e){}});player=null}}
