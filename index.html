@@ -563,7 +563,9 @@ $('saveBtn').onclick=async()=>{
 // ---- ピアノロール ----
 // 左に鍵盤（横にスクロールしても残る）、右に音符。拍の線は MIDI と同じ基準（origin）から引く
 const cv=$('cv'),g=cv.getContext('2d'),kb=$('kb'),kg=kb.getContext('2d'),RH=16,KBW=44;let lo=48,hi=84;
-const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||'#888';
+// 色は CSS 変数から取る。light-dark() のままだとキャンバスが読めないので、見えない要素に塗って「実際の色」にしてから使う
+const probe=document.createElement('i');probe.style.cssText='position:absolute;width:0;height:0;overflow:hidden';document.body.appendChild(probe);
+const css=n=>{probe.style.color=`var(${n})`;return getComputedStyle(probe).color||'#888'};
 const BLACK=[1,3,6,8,10];
 const gridSec=()=>{const q=+$('q').value;return q>0?q/480*60/tempo():0}; // 「そろえる」の細かさ（秒）。しないなら0
 const snapT=t=>{const s=gridSec();return s?origin+Math.round((t-origin)/s)*s:t};
@@ -673,6 +675,7 @@ function scrollToNotes(){ // 音符が見える高さまでスクロール
   if(!notes.length)return;const ps=notes.map(n=>n.pitch),mid=(Math.min(...ps)+Math.max(...ps))/2,roll=$('roll');
   roll.scrollTop=Math.max(0,yOf(mid)-roll.clientHeight/2);roll.scrollLeft=Math.max(0,notes[0].start*pxsNow()-40)}
 new MutationObserver(draw).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+try{matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>draw())}catch(e){} // ダークモードの切り替えで塗り直す
 draw();
 if('serviceWorker' in navigator&&(location.protocol==='https:'||location.hostname==='localhost'))navigator.serviceWorker.register('sw.js').catch(()=>{});
 }
