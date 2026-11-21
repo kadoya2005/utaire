@@ -271,18 +271,21 @@ function analyze(){
     $('origBtn').disabled=false;draw();selUI();
   },20);
 }
+let audioId=0; // 音声を読み込むたびに増やす。古い処理の結果が新しい音声に混ざらないようにする
 async function useBuffer(buf){
+  const my=++audioId;
   const ab=await ctx().decodeAudioData(buf);
+  if(my!==audioId)return; // 後から選んだ音声のほうを優先
   sr=ab.sampleRate;const c0=ab.getChannelData(0);
   if(ab.numberOfChannels>1){const c1=ab.getChannelData(1);audio=new Float32Array(c0.length);for(let i=0;i<c0.length;i++)audio[i]=(c0[i]+c1[i])/2}else audio=c0.slice();
-  F=null;analyze();if(!asrBusy)$('aiBtn').disabled=false;
+  F=null;analyze();if(!asrRun)$('aiBtn').disabled=false;
 }
 // ---- 声から歌詞（ブラウザの音声認識 → 辞書でひらがなに）----
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
 const isIOS=/iPhone|iPad|iPod/i.test(navigator.userAgent)||(navigator.maxTouchPoints>1&&/Mac/.test(navigator.userAgent));
 const isMobile=isIOS||/Android/i.test(navigator.userAgent);
 let hearing=null,hearBusy=false,lyrFromHear=false,lyrGen=0,cand='';
-const hearSt=(t,bad)=>{$('hearSt').textContent=t;$('hearSt').classList.toggle('bad',!!bad);$('useCand').hidden=true};
+const hearSt=(t,bad)=>{$('hearSt').textContent=t;$('hearSt').classList.toggle('bad',!!bad)};
 if(!SR){$('hearRow').style.display='none';hearSt('このブラウザは「声で歌詞を入れる」に対応していません。録音のあと「🤖 AIで歌詞を起こす」を使ってください。')}
 else if(isMobile){$('autoLyr').checked=false;hearSt('スマホでは録音と同時の聞き取りがうまく動かないことが多いので、最初はオフにしています。「🎤 声で歌詞を入れる」で読み上げるか、録音のあと「🤖 AIで歌詞を起こす」を使ってください。')}
 // 診断表示：実機で何が起きているか見えるように、音声認識のできごとを記録する（歌詞の中身は記録しない）
@@ -290,30 +293,34 @@ const T0=performance.now(),diag=[];
 const dlog=m=>{const s=((performance.now()-T0)/1000).toFixed(2)+'s '+m;diag.push(s);if(diag.length>300)diag.shift();const el=$('diagLog');if(el){el.textContent=diag.join('\n');el.scrollTop=el.scrollHeight}};
 let hearNo=0;
 function hear(onText,opt={}){ // 止めるまで聞き続ける（途中で切れたら自動でつなぎ直す）
-  const id=++hearNo;let got='',fin='',tmp='',want=true,err='',noSpeech=0,heard=false,r=null,resolve,ended=false,tries=0,quiet=0,timer=0;
+  const id=++hearNo;let got='',fin='',tmp='',want=true,err='',noSpeech=0,heard=false,r=null,resolve,ended=false,tries=0,quiet=0,timer=0,live=false,stopping=false;
   const done=new Promise(res=>resolve=res);
   const L=m=>dlog(`[聞き取り${id}-${tries}] ${m}`);
   const finish=why=>{if(ended)return;ended=true;clearTimeout(timer);got+=fin+tmp;fin=tmp='';
-    L(`おわり（${why}）${got.trim().length}字 no-speech${noSpeech}回 ${err?'エラー '+err:''}`);resolve({text:got.trim(),err,noSpeech,audio:heard});opt.onEnd&&opt.onEnd()};
+    L(`おわり（${why}）${got.trim().length}字 no-speech${noSpeech}回 ${err?'エラー '+err:''}`);resolve({text:got.trim(),err,noSpeech,audio:heard});
+    if(opt.onEnd)setTimeout(opt.onEnd,0)}; // 開始直後に失敗しても、呼び出し側の準備が終わってから知らせる
   const go=()=>{
     const s=r=new SR();s.lang='ja-JP';s.continuous=true;s.interimResults=true;tries++;let gotResult=false;
-    s.onstart=()=>{if(s===r)L('start')};
-    s.onaudiostart=()=>{if(s!==r)return;heard=true;L('audiostart');opt.onReady&&opt.onReady()};
+    s.onstart=()=>{if(s===r&&!ended)L('start')};
+    s.onaudiostart=()=>{if(s!==r||ended)return;heard=true;L('audiostart');opt.onReady&&opt.onReady()};
     s.onspeechstart=()=>{if(s===r)L('speechstart')};
-    s.onresult=e=>{if(s!==r)return;gotResult=true;quiet=0; // 毎回そのセッションの結果を最初から組み立て直す（足し続けない＝重複しない）
+    s.onresult=e=>{if(s!==r||ended)return;gotResult=true;quiet=0; // 毎回そのセッションの結果を最初から組み立て直す（足し続けない＝重複しない）
       let f='',t='';for(let i=0;i<e.results.length;i++){const x=e.results[i];if(x.isFinal)f+=x[0].transcript;else t+=x[0].transcript}
       fin=f;tmp=t;L(`result 確定${f.length}字 途中${t.length}字`);onText&&onText((got+fin+tmp).trim())};
-    s.onerror=e=>{if(s!==r)return;L('error '+e.error);if(e.error==='no-speech')noSpeech++;else if(e.error!=='aborted'){err=e.error;want=false}};
-    s.onend=()=>{if(s!==r)return;L('end');
+    s.onerror=e=>{if(s!==r||ended)return;L('error '+e.error);if(e.error==='no-speech')noSpeech++;else if(e.error!=='aborted'){err=e.error;want=false}};
+    s.onend=()=>{if(s!==r||ended)return;L('end');live=false;
       got+=fin;fin='';if(!want){got+=tmp;tmp='';finish('停止');return} // 自動でつなぎ直すときは確定した文字だけ残す
       tmp='';if(!gotResult)quiet++;
       if(quiet>=8||tries>=100){err=err||'no-speech';finish('声が届かないまま');return}
-      timer=setTimeout(()=>{if(!want){finish('停止');return}try{go()}catch(e){err=e.message;finish('再開失敗')}},quiet?Math.min(2000,300*quiet):150)};
-    if(opt.track&&!isMobile){try{s.start(opt.track);L('録音と同じマイクで開始');return}catch(e){L('マイク共有は使えない')}}
+      timer=setTimeout(()=>{timer=0;if(!want){finish('停止');return}try{go()}catch(e){err=e.message;finish('再開失敗')}},quiet?Math.min(2000,300*quiet):150)};
+    live=true;
+    if(opt.track&&!isMobile){try{s.start(opt.track);L('録音のマイクを渡して開始（共有できたかは結果で判断）');return}catch(e){L('マイク共有は使えない')}}
     s.start();
   };
   try{go()}catch(e){err=e.message;finish('開始失敗')}
-  return {done,stop(){if(ended)return done;want=false;clearTimeout(timer);try{r&&r.stop()}catch(e){}
+  return {done,stop(){if(ended||stopping)return done;stopping=true;want=false;
+    if(!live){clearTimeout(timer);finish('停止');return done} // つなぎ直す待ち時間中なら、すぐ終わる
+    try{r&&r.stop()}catch(e){}
     setTimeout(()=>{if(!ended){L('止まらないので打ち切り');try{r&&r.abort()}catch(e){}finish('打ち切り')}},3000);
     return done}};
 }
@@ -349,24 +356,27 @@ function toKana(text){
     kanaW.postMessage({id,text});
   });
 }
-async function putLyrics(text,emptyText,gen){
+async function putLyrics(text,emptyText,gen,aid){ // gen=聞き取りを始めたときの歌詞欄の版、aid=その声の音声ID
   text=(text||'').trim();
   if(!text){hearSt(emptyText||'声を文字にできませんでした。',true);return}
   if(gen===undefined)gen=lyrGen;
+  if(aid!==undefined&&aid!==audioId){ // 待っている間に別の録音・ファイルに変わった
+    cand='';hearSt('前の音声の聞き取り結果は、今の音声とちがうので入れませんでした。');return}
   hearSt('ひらがなにしています…（初回は辞書の読み込みに少し時間がかかります）');
   let kana=text,note='';
   try{kana=await toKana(text)}catch(e){note='（ひらがなにできなかったので、そのまま入れました。漢字を直してください）'}
-  if(gen!==lyrGen){ // 待っている間に歌詞欄が手で直されたら、上書きせず候補として見せる
+  if(aid!==undefined&&aid!==audioId){cand='';hearSt('前の音声の聞き取り結果は、今の音声とちがうので入れませんでした。');return}
+  if(gen!==lyrGen){ // 聞き取りの間に歌詞欄が手で直されたら、上書きせず候補として見せる
     cand=kana;hearSt('聞き取った歌詞の候補：「'+kana+'」（歌詞欄が編集されていたので入れていません）');$('useCand').hidden=false;return}
   setLyrics(kana);
   hearSt('聞き取った文字：「'+text+'」'+note+'　まちがいは上の欄で直せます。',!!note);
 }
-function setLyrics(kana){$('lyr').value=kana;lyrFromHear=true;lyrGen++;if(notes.length){flow();report();draw();selUI()}}
+function setLyrics(kana){$('lyr').value=kana;lyrFromHear=true;lyrGen++;cand='';$('useCand').hidden=true;if(notes.length){flow();report();draw();selUI()}}
 $('useCand').onclick=()=>{if(cand){setLyrics(cand);hearSt('候補の歌詞を入れました。')}};
 $('hearBtn').onclick=async()=>{
-  if(rec||hearBusy)return;
+  if(rec||recBusy||hearBusy)return;
   if(hearing){hearBusy=true;$('hearBtn').disabled=true;$('hearBtn').textContent='止めています…';
-    try{const h=hearing,gen=lyrGen,r=await h.stop();if(hearing===h)hearing=null;
+    try{const h=hearing,gen=h.gen,r=await h.stop();if(hearing===h)hearing=null;
       if(r.err&&r.err!=='no-speech'&&!r.text)hearSt(hearErr(r.err),true);else await putLyrics(r.text,emptyMsg(r),gen)}
     finally{hearBusy=false;$('hearBtn').disabled=false;$('hearBtn').textContent='🎤 声で歌詞を入れる'}
     return}
@@ -374,31 +384,36 @@ $('hearBtn').onclick=async()=>{
   const h=hearing=hear(t=>hearSt('聞き取り中：'+t),{
     onReady:()=>{if(!/聞き取り中/.test($('hearSt').textContent))hearSt('どうぞ。歌詞を普通に読み上げてください。終わったら「聞き取りをやめる」。')},
     onEnd:()=>{if(hearing===h&&!hearBusy)$('hearBtn').onclick()}}); // 勝手に終わったときも結果を出す
+  h.gen=lyrGen; // 聞き取りを始めた時点の歌詞欄。途中で手で直したら上書きしない
   $('hearBtn').textContent='■ 聞き取りをやめる';
 };
 // ---- 録音 ----
 let recHear=null,recBusy=false;
 $('recBtn').onclick=async()=>{
   if(rec){if(rec.state==='recording'){recHear&&recHear.stop();rec.stop()}return} // 先に聞き取りを止めてから録音を止める
-  if(recBusy)return;recBusy=true;
+  if(recBusy||hearBusy)return;recBusy=true;
+  let ms=null,mr=null,myHear=null;
+  const release=()=>{cancelAnimationFrame(raf);if(ms)ms.getTracks().forEach(t=>t.stop());ms=null}; // マイクと描画を放す（何度呼んでもよい）
   try{
     if(hearing)await $('hearBtn').onclick();
-    let ms;
     try{ms=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})}
     catch(e){status(location.protocol==='https:'||location.hostname==='localhost'?'マイクを使えませんでした。ブラウザの設定でこのサイトのマイクを許可してください。':'マイクは https:// のページでしか使えません。GitHub Pagesなどに置いて開いてください。',true);return}
     stream=ms;try{await ctx().resume()}catch(e){}
     const track=ms.getAudioTracks()[0];
     track.onmute=()=>dlog('録音マイク mute');track.onunmute=()=>dlog('録音マイク unmute');track.onended=()=>dlog('録音マイク ended');
-    const chunks=[],mr=rec=new MediaRecorder(ms);let myHear=null;
+    const chunks=[];mr=new MediaRecorder(ms);
     mr.ondataavailable=e=>chunks.push(e.data);
     mr.onstop=async()=>{
-      cancelAnimationFrame(raf);if(rec===mr)rec=null;
+      if(rec===mr)rec=null;
       $('recBtn').textContent='● 録音';$('recBtn').className='main';$('lvl').style.width='0';$('live').textContent='—';
       const blob=new Blob(chunks,{type:chunks[0]&&chunks[0].type||mr.mimeType||''});
-      const gen=lyrGen,hp=myHear?myHear.stop():null;if(recHear===myHear)recHear=null;
-      try{await useBuffer(await blob.arrayBuffer())}catch(e){status('録音の読み込みに失敗しました：'+e.message,true)} // MIDI解析は聞き取りを待たない
-      try{if(hp){const r=await hp;if(r.err&&r.err!=='no-speech'&&!r.text)hearSt(hearErr(r.err),true);else await putLyrics(r.text,emptyMsg(r),gen)}}
-      finally{ms.getTracks().forEach(t=>t.stop())} // マイクは聞き取りが終わってから放す
+      const hp=myHear?myHear.stop():null,gen=myHear?myHear.gen:lyrGen;if(recHear===myHear)recHear=null;
+      if(!hp)release();
+      const p=useBuffer(await blob.arrayBuffer()).catch(e=>status('録音の読み込みに失敗しました：'+e.message,true)); // MIDI解析は聞き取りを待たない
+      const aid=audioId; // useBuffer が同期的に番号を進めているので、これがこの録音の番号
+      if(hp){const r=await hp;release(); // 聞き取りが終わったらすぐマイクを放す（かな変換は待たない）
+        await p;
+        if(r.err&&r.err!=='no-speech'&&!r.text)hearSt(hearErr(r.err),true);else await putLyrics(r.text,emptyMsg(r),gen,aid)}
     };
     const src=ctx().createMediaStreamSource(ms);an=ctx().createAnalyser();an.fftSize=2048;src.connect(an);
     const buf=new Float32Array(an.fftSize);
@@ -406,9 +421,12 @@ $('recBtn').onclick=async()=>{
       $('lvl').style.width=Math.min(100,r*400)+'%';
       if(r>0.01){const p=Core.yin(buf,0,1024,ctx().sampleRate,65,1100);$('live').textContent=p.f?nn(Math.round(69+12*Math.log2(p.f/440))):'…'}else $('live').textContent='—';
       raf=requestAnimationFrame(tick)};
-    tick();mr.start();dlog('録音開始 '+(mr.mimeType||'形式不明'));status('録音中… 歌い終わったら「停止」を押してください。');
-    if(SR&&$('autoLyr').checked&&(!$('lyr').value.trim()||lyrFromHear)){recHear=myHear=hear(t=>hearSt('聞き取り中：'+t),{track});hearSt('録音しながら歌詞も聞き取っています…')}
+    mr.start();rec=mr;tick();dlog('録音開始 '+(mr.mimeType||'形式不明'));status('録音中… 歌い終わったら「停止」を押してください。');
+    if(SR&&$('autoLyr').checked&&(!$('lyr').value.trim()||lyrFromHear)){recHear=myHear=hear(t=>hearSt('聞き取り中：'+t),{track});myHear.gen=lyrGen;hearSt('録音しながら歌詞も聞き取っています…')}
     $('recBtn').textContent='■ 停止';$('recBtn').className='rec';
+  }catch(e){ // 録音を始められなかった：マイク・描画・状態を元に戻す
+    dlog('録音開始エラー '+e.message);if(myHear)myHear.stop();if(rec===mr)rec=null;release();
+    $('recBtn').textContent='● 録音';$('recBtn').className='main';status('録音を始められませんでした：'+e.message,true);
   }finally{recBusy=false}
 };
 // ---- 録音からAIで歌詞を起こす（Whisper・ブラウザの中だけで動く。押したときだけ読み込む）----
@@ -418,7 +436,7 @@ env.allowLocalModels=false;
 let p=null,cur='';
 self.onmessage=async e=>{const {model,pcm}=e.data;
   try{
-    if(!p||cur!==model){p=null;
+    if(!p||cur!==model){if(p){try{await p.dispose()}catch(_){}}p=null;
       p=await pipeline('automatic-speech-recognition',model,{dtype:'q8',device:'wasm',
         progress_callback:x=>{if(x.status==='progress')self.postMessage({type:'dl',file:x.file,loaded:x.loaded,total:x.total})}});
       cur=model}
@@ -427,46 +445,53 @@ self.onmessage=async e=>{const {model,pcm}=e.data;
     self.postMessage({type:'done',text:(out&&out.text)||''});
   }catch(err){self.postMessage({type:'err',msg:String(err&&err.message||err)})}
 };`;
-let asrW=null,asrBusy=false;
-function asrReset(){asrBusy=false;$('aiBtn').textContent='🤖 AIで歌詞を起こす';$('aiBtn').disabled=!audio}
+let asrW=null,asrRun=null; // asrRun：いま動いているAIの1回分（中止の印を持つ）
+function asrKill(){if(asrW){asrW.terminate();asrW=null}}
+function asrWorker(){
+  if(!asrW){const u=URL.createObjectURL(new Blob([ASR_WORKER],{type:'text/javascript'}));asrW=new Worker(u,{type:'module'});setTimeout(()=>URL.revokeObjectURL(u),60000)}
+  return asrW;
+}
 async function to16k(){ // 解析に使った音をそのまま16kHzモノラルにする
   const len=Math.ceil(audio.length*16000/sr),oc=new OfflineAudioContext(1,len,16000),b=oc.createBuffer(1,audio.length,sr);
   b.copyToChannel(audio,0);const s=oc.createBufferSource();s.buffer=b;s.connect(oc.destination);s.start();
   return (await oc.startRendering()).getChannelData(0).slice();
 }
-let asrCancel=null;
+function aiIdle(){$('aiBtn').textContent='🤖 AIで歌詞を起こす';$('aiBtn').disabled=!audio}
 $('aiBtn').onclick=async()=>{
-  if(asrBusy){if(asrW){asrW.terminate();asrW=null}asrCancel&&asrCancel();dlog('AI 中止');return}
+  if(asrRun){asrRun.cancel();return} // 実行中なら中止
   if(!audio)return;
   const secs=audio.length/sr;
   if(secs>180){hearSt('AIで起こせるのは3分までです。短く録り直すか、短いファイルを使ってください。',true);return}
-  const model=$('aiModel').value,gen=lyrGen;
-  asrBusy=true;$('aiBtn').textContent='■ 中止';
-  hearSt('準備中…');dlog(`AI 開始 ${model.split('/')[1]} ${secs.toFixed(1)}秒`);const t0=performance.now();
+  const model=$('aiModel').value,gen=lyrGen,aid=audioId,t0=performance.now();
+  let reject=null;
+  const run=asrRun={cancelled:false,cancel(){this.cancelled=true;asrKill();reject&&reject(new Error('中止'))}};
+  $('aiBtn').textContent='■ 中止';hearSt('準備中…');dlog(`AI 開始 ${model.split('/')[1]} ${secs.toFixed(1)}秒`);
   try{
     const pcm=await to16k();
-    if(!asrW)asrW=new Worker(URL.createObjectURL(new Blob([ASR_WORKER],{type:'text/javascript'})),{type:'module'});
-    const files={};
+    if(run.cancelled)throw new Error('中止');
+    const w=asrWorker(),files={};
     const text=await new Promise((res,rej)=>{
-      asrCancel=()=>rej(new Error('中止'));
-      asrW.onmessage=e=>{const d=e.data;
-        if(d.type==='dl'){files[d.file]=[d.loaded||0,d.total||0];let a=0,b=0;for(const k in files){a+=files[k][0];b+=files[k][1]}
+      reject=rej;let wd=0;
+      const watch=ms=>{clearTimeout(wd);wd=setTimeout(()=>{asrKill();rej(new Error('時間がかかりすぎたので止めました'))},ms)};
+      watch(180000); // 読み込み中は進みが3分止まったら打ち切り
+      w.onmessage=e=>{const d=e.data;
+        if(d.type==='dl'){watch(180000);files[d.file]=[d.loaded||0,d.total||0];let a=0,b=0;for(const k in files){a+=files[k][0];b+=files[k][1]}
           hearSt(`AIのモデルを読み込み中… ${(a/1e6).toFixed(0)} / ${(b/1e6).toFixed(0)} MB（初回だけ。2回目からは早くなります）`)}
-        else if(d.type==='run'){dlog(`AI モデル準備OK ${((performance.now()-t0)/1000).toFixed(1)}s`);hearSt('AIが文字にしています…（長い録音ほど時間がかかります）')}
-        else if(d.type==='done')res(d.text);
-        else if(d.type==='err')rej(new Error(d.msg))};
-      asrW.onerror=e=>{e.preventDefault();rej(new Error(e.message||'AIを読み込めませんでした'))};
-      asrW.postMessage({model,pcm},[pcm.buffer]);
+        else if(d.type==='run'){watch(Math.max(120000,secs*20000));dlog(`AI モデル準備OK ${((performance.now()-t0)/1000).toFixed(1)}s`);hearSt('AIが文字にしています…（長い録音ほど時間がかかります）')}
+        else if(d.type==='done'){clearTimeout(wd);res(d.text)}
+        else if(d.type==='err'){clearTimeout(wd);rej(new Error(d.msg))}};
+      w.onmessageerror=()=>{clearTimeout(wd);rej(new Error('AIとのやりとりに失敗しました'))};
+      w.onerror=e=>{e.preventDefault();clearTimeout(wd);asrKill();rej(new Error(e.message||'AIを読み込めませんでした'))};
+      w.postMessage({model,pcm},[pcm.buffer]);
     });
     dlog(`AI おわり ${((performance.now()-t0)/1000).toFixed(1)}s ${text.trim().length}字`);
-    asrReset();
-    await putLyrics(text,'AIでも声を文字にできませんでした。マイクに近づいて、伴奏なしで録ってみてください。',gen);
+    if(asrRun===run){asrRun=null;aiIdle()}
+    await putLyrics(text,'AIでも声を文字にできませんでした。マイクに近づいて、伴奏なしで録ってみてください。',gen,aid);
   }catch(e){
-    asrReset();
-    if(e.message==='中止'){hearSt('AIの文字起こしを中止しました。');return}
-    dlog('AI エラー '+e.message);if(asrW){asrW.terminate();asrW=null}
+    if(asrRun===run){asrRun=null;aiIdle()}
+    if(e.message==='中止'){dlog('AI 中止');hearSt('AIの文字起こしを中止しました。');return}
+    dlog('AI エラー '+e.message);asrKill();
     hearSt('AIの文字起こしに失敗しました：'+e.message+'（ネット接続とメモリの空きを確認してください）',true)}
-  finally{asrCancel=null}
 };
 $('file').onchange=async e=>{const f=e.target.files[0];if(!f)return;status('読み込み中…');try{await useBuffer(await f.arrayBuffer())}catch(err){status('このファイルは読み込めませんでした（'+err.message+'）。WAVやMP3で試してください。',true)}};
 $('reBtn').onclick=analyze;
@@ -523,7 +548,7 @@ function selUI(){const on=sel>=0&&notes[sel];['selLyric','upBtn','dnBtn','mPrev'
   const n=notes[sel];$('selInfo').textContent=`${sel+1}番目：${nn(n.pitch)}・${(n.end-n.start).toFixed(2)}秒`;$('selLyric').value=n.lyric;
   $('mPrev').disabled=sel===0;$('mNext').disabled=sel===notes.length-1}
 const act=f=>()=>{if(sel<0)return;snap();f();draw();selUI()};
-$('selLyric').onchange=act(()=>notes[sel].lyric=$('selLyric').value.trim()||'-');
+$('selLyric').onchange=act(()=>{notes[sel].lyric=$('selLyric').value.trim()||'-';lyrGen++});
 $('upBtn').onclick=act(()=>notes[sel].pitch++);$('dnBtn').onclick=act(()=>notes[sel].pitch--);
 $('mPrev').onclick=act(()=>{const p=notes[sel-1];p.end=notes[sel].end;notes.splice(sel,1);sel--});
 $('mNext').onclick=act(()=>{const n=notes[sel+1];notes[sel].end=n.end;notes.splice(sel+1,1)});
