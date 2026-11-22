@@ -168,7 +168,7 @@ function segment(F,mode,fixPitch){
   var fr=F.fr,hop=F.hop,n=fr.length;if(!n)return [];
   var rmsArr=fr.map(function(f){return f.rms});
   var floor=pct(rmsArr,0.1),peak=pct(rmsArr,0.95);
-  var th=Math.max(0.006,floor*3,peak*0.06);
+  var th=Math.max(0.006,Math.min(floor*3,peak*0.35),peak*0.06); // 休みの少ない録音では floor が声の大きさになるので、上限をつける
   var db=rmsArr.map(function(r){return 20*Math.log10(r+1e-9)});
   var sm=fr.map(function(f,i){ // 高さを5フレームの中央値でならす
     if(isNaN(f.midi))return NaN;var w=[];for(var k=-2;k<=2;k++){var g=fr[i+k];if(g&&!isNaN(g.midi))w.push(g.midi)}return median(w)});
@@ -195,6 +195,7 @@ function segment(F,mode,fixPitch){
   notes.forEach(function(nt){
     var len=nt.e-nt.s;if(len<=0)return;
     if(len<6){var pv=out[out.length-1];if(pv&&nt.s-pv.e<=3){pv.e=nt.e;pv.p=pv.p.concat(nt.p)}return}
+    if(mode==='speak'&&nt.p.length<3)return; // 母音（声の高さ）がほとんどない区間は、息や雑音とみなす
     out.push(nt);
   });
   return out.map(function(nt){return {start:nt.s*hop,end:nt.e*hop,pitch:mode==='speak'?fixPitch:Math.round(median(nt.p)),lyric:''}});
@@ -432,6 +433,7 @@ $('recBtn').onclick=async()=>{
     catch(e){status(location.protocol==='https:'||location.hostname==='localhost'?'マイクを使えませんでした。ブラウザの設定でこのサイトのマイクを許可してください。':'マイクは https:// のページでしか使えません。GitHub Pagesなどに置いて開いてください。',true);return}
     stream=ms;try{await ctx().resume()}catch(e){}
     const track=ms.getAudioTracks()[0];
+    try{const st=track.getSettings();dlog(`マイク設定 AGC:${st.autoGainControl} NS:${st.noiseSuppression} EC:${st.echoCancellation} ${st.sampleRate||''}Hz ch:${st.channelCount||''}`)}catch(e){}
     track.onmute=()=>dlog('録音マイク mute');track.onunmute=()=>dlog('録音マイク unmute');track.onended=()=>dlog('録音マイク ended');
     const chunks=[];mr=new MediaRecorder(ms);
     mr.ondataavailable=e=>chunks.push(e.data);
@@ -452,7 +454,7 @@ $('recBtn').onclick=async()=>{
     const buf=new Float32Array(myAn.fftSize);
     const tick=()=>{if(myRaf<0)return;myAn.getFloatTimeDomainData(buf);let e=0;for(const v of buf)e+=v*v;const r=Math.sqrt(e/buf.length);
       $('lvl').style.width=Math.max(0,Math.min(100,(20*Math.log10(r+1e-9)+60)*2))+'%'; // -60dB で0、-10dB で満タン
-      if(r>0.01){const p=Core.yin(buf,0,1024,ctx().sampleRate,65,1100);$('live').textContent=p.f?nn(Math.round(69+12*Math.log2(p.f/440))):'…'}else $('live').textContent='—';
+      if(r>0.003){const p=Core.yin(buf,0,1024,ctx().sampleRate,65,1100);$('live').textContent=p.f?nn(Math.round(69+12*Math.log2(p.f/440))):'…'}else $('live').textContent='—';
       if(myRaf>=0)myRaf=requestAnimationFrame(tick)};
     mr.start();rec=mr;tick();dlog('録音開始 '+(mr.mimeType||'形式不明'));status('録音中… 歌い終わったら「停止」を押してください。');
     if(SR&&$('autoLyr').checked&&(!$('lyr').value.trim()||lyrFromHear)){recHear=myHear=hear(t=>hearSt('聞き取り中：'+t),{track});myHear.gen=lyrGen;hearSt('録音しながら歌詞も聞き取っています…')}
