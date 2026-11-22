@@ -57,7 +57,7 @@ button:disabled{opacity:.45;cursor:default}
 <body>
 <header>
 <h1>うたいれ</h1>
-<p class="lead"><span class="ver">v6.2</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
+<p class="lead"><span class="ver">v6.3</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
 <ol class="steps">
 <li>歌詞を<b>ひらがな</b>で入れる（空のままでも、録音した声から自動で入ります）</li><li>「録音」を押して歌う → 「停止」</li><li>ピアノロールで確認・手直し → 「MIDIを保存」</li>
 </ol>
@@ -104,6 +104,7 @@ button:disabled{opacity:.45;cursor:default}
 <button id="playBtn" disabled>▶ 音符を試聴</button>
 <button id="origBtn" disabled>▶ 録音を再生</button>
 <button id="saveBtn" class="main" disabled>MIDIを保存</button>
+<button id="wavBtn" disabled>録音を保存（WAV）</button>
 </div>
 <p class="status" id="st">まだ録音していません。</p>
 </section>
@@ -315,7 +316,7 @@ async function useBuffer(buf,my){
   loading=false;
   sr=ab.sampleRate;const c0=ab.getChannelData(0);
   if(ab.numberOfChannels>1){const c1=ab.getChannelData(1);audio=new Float32Array(c0.length);for(let i=0;i<c0.length;i++)audio[i]=(c0[i]+c1[i])/2}else audio=c0.slice();
-  F=null;analyze();if(!asrRun)$('aiBtn').disabled=false;
+  F=null;analyze();if(!asrRun)$('aiBtn').disabled=false;$('wavBtn').disabled=false;
   return true;
 }
 // ---- 声から歌詞（ブラウザの音声認識 → 辞書でひらがなに）----
@@ -570,6 +571,22 @@ $('playBtn').onclick=()=>{
 };
 $('origBtn').onclick=()=>{if(!audio)return;stopPlay();const c=ctx(),b=c.createBuffer(1,audio.length,sr);b.copyToChannel(audio,0);const s=c.createBufferSource();s.buffer=b;s.connect(c.destination);const t0=c.currentTime+0.05;s.start(t0);player=[s];startHead(c,t0,0,audio.length/sr)};
 // ---- 保存 ----
+// 録音を WAV で保存（解析に使ったのとまったく同じ音。不具合を調べるときにも使う）
+async function giveFile(blob,name,type,doneMsg){
+  const mobile=/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)||(navigator.maxTouchPoints>1&&/Mac/.test(navigator.userAgent));
+  if(mobile&&navigator.canShare){try{const f=new File([blob],name,{type});if(navigator.canShare({files:[f]})){await navigator.share({files:[f],title:name});status('共有しました：'+name);return}}catch(e){if(e.name==='AbortError')return}}
+  const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),2000);
+  status(doneMsg||('保存しました：'+name));
+}
+$('wavBtn').onclick=async()=>{
+  if(!audio)return;
+  const n=audio.length,buf=new ArrayBuffer(44+n*2),v=new DataView(buf),w=(o,t)=>{for(let i=0;i<t.length;i++)v.setUint8(o+i,t.charCodeAt(i))};
+  w(0,'RIFF');v.setUint32(4,36+n*2,true);w(8,'WAVE');w(12,'fmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
+  v.setUint32(24,sr,true);v.setUint32(28,sr*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);w(36,'data');v.setUint32(40,n*2,true);
+  for(let i=0;i<n;i++){const x=Math.max(-1,Math.min(1,audio[i]));v.setInt16(44+i*2,x<0?x*32768:x*32767,true)}
+  const d=new Date(),name=`utaire_${d.getMonth()+1}${String(d.getDate()).padStart(2,'0')}_${String(d.getHours()).padStart(2,'0')}${String(d.getMinutes()).padStart(2,'0')}.wav`;
+  await giveFile(new Blob([buf],{type:'audio/wav'}),name,'audio/wav');
+};
 $('saveBtn').onclick=async()=>{
   if(!notes.length){status('音符がないので保存できません。',true);return}
   const bpm=tempo(),tn=Core.toTicks(notes,bpm,+$('q').value,$('legato').checked,origin);
