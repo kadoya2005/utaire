@@ -57,7 +57,7 @@ button:disabled{opacity:.45;cursor:default}
 <body>
 <header>
 <h1>うたいれ</h1>
-<p class="lead"><span class="ver">v7</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
+<p class="lead"><span class="ver">v7.1</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
 <ol class="steps">
 <li>歌詞を<b>ひらがな</b>で入れる（空のままでも、録音した声から自動で入ります）</li><li>「録音」を押して歌う → 「停止」</li><li>ピアノロールで確認・手直し → 「MIDIを保存」</li>
 </ol>
@@ -165,13 +165,14 @@ function frames(data,sr0){
 }
 function pct(a,p){var b=a.slice().sort(function(u,v){return u-v});return b[Math.min(b.length-1,Math.floor(b.length*p))]||0}
 function median(a){var b=a.slice().sort(function(u,v){return u-v});return b.length?b[b.length>>1]:NaN}
-var SEG={slope:0.06,devSemi:0.8,relSemi:0.4,devFrames:12,gapMax:3,f0Bridge:5,onsetDb:6,minLen:0.12,mergeSemi:2};
-// v7 の区切り方（作者の録音3本で調整。Python の試作 seg3.py と同じ結果になる）
-// ・音量の切れ目（無音）と立ち上がりで音節を区切る。音量はあって声の高さだけ一瞬取れないときは 50ms まで橋渡し
-// ・音節の中で音が変わったとみなすのは、丸める前の値で今の音の中心から 0.8 半音以上ずれた状態が 120ms 続いたとき
-//   （候補が出ている間は中心を動かさない。0.4 半音以内に戻ったら取り消し）
+var SEG={slope:0.06,devSemi:0.8,holdSemi:0.6,relSemi:0.4,devFrames:12,gapMax:3,f0Bridge:5,onsetDb:6,minLen:0.12,mergeSemi:2};
+// v7.1 の区切り方（作者の録音3本で調整。Python の試作 seg4.py と同じ手順）
+// ・音節は音量の切れ目と立ち上がりで区切る。立ち上がりは声の高さが取れない間も見る（同じ高さの歌い直しを消さない）
+// ・音量はあって声の高さだけ欠けるときは 50ms まで切らない。それを超えたら欠け始めで切る（無音とは別に数える）
+// ・音節の中で音が変わったとみなすのは、丸める前の値で今の音の中心から 0.8 半音以上ずれ、0.6 半音以上のずれが 120ms 分たまったとき
+//   （候補の間は中心を動かさない。0.4 半音以内に戻ったら取り消して、たまっていた分をすぐ戻す）
 // ・声のすべり（しゃくり・ずり下げ）は音の高さの計算に使わない
-// ・0.12 秒未満の音は、つながっている隣のうち高さの近いほう（2 半音以内）へまとめる
+// ・0.12 秒未満の音は「音の高さで分けた切れ目」の向こうの、2 半音以内の近い音にだけまとめる（無音や立ち上がりの切れ目は越えない）
 function segment(F,mode,fixPitch){
   var P=SEG,fr=F.fr,hop=F.hop,n=fr.length;if(!n)return [];
   var rmsArr=fr.map(function(f){return f.rms});
@@ -184,57 +185,60 @@ function segment(F,mode,fixPitch){
   function steady(i){if(isNaN(sm[i]))return false;var s=slope(i);return !(s>P.slope)}
   function loud(i){return rmsArr[i]>th}
   function onset(i){if(i<4)return false;var m=Infinity;for(var k=1;k<=4;k++)m=Math.min(m,db[i-k]);return db[i]-m>(mode==='speak'?7:P.onsetDb)&&rmsArr[i]>th}
-  function center(c){var q=c.q.length>=3?c.q:c.p;return q.length?median(q):NaN}
-  function newcur(s){return {s:s,p:[],q:[],hold:[]}}
-  var notes=[],cur=null,gap=0,f0miss=0,cand=0,candStart=0,candDir=0,lastOn=-99,gapMax=mode==='speak'?5:P.gapMax;
-  function close(e,why){if(cur){cur.e=e;cur.why=why;notes.push(cur);cur=null}}
+  function center(idx){var q=idx.filter(steady).map(function(j){return sm[j]});if(q.length<3)q=idx.map(function(j){return sm[j]});return q.length?median(q):NaN}
+  var notes=[],cur=null,gap=0,miss=0,missStart=0,cand=0,candStart=0,candDir=0,hold=[],lastOn=-99,gapMax=mode==='speak'?5:P.gapMax;
+  function close(e,why){if(cur){hold.forEach(function(j){if(j<e)cur.idx.push(j)});cur.e=e;cur.why=why;notes.push(cur);cur=null}hold=[];cand=0} // 確定しなかった候補は、その音符のもの
+  function start(s){cur={s:s,idx:[]};lastOn=s}
   var i=0;
   while(i<n){
-    var voiced=!isNaN(sm[i]),act;
-    if(mode==='speak')act=loud(i);
-    else{
-      act=loud(i)&&voiced;
-      if(cur&&loud(i)&&!voiced){f0miss++;if(f0miss<=P.f0Bridge){i++;continue}} // 声の高さだけ一瞬取れない：短ければ切らない
-    }
-    if(!act){gap++;if(cur&&gap>=gapMax){close(i-gap+1,'gap');cand=0}i++;continue}
-    gap=0;f0miss=0;
-    if(!cur){cur=newcur(i);lastOn=i;cand=0}
-    else if(onset(i)&&i-cur.s>=8&&i-lastOn>=8){close(i,'onset');cur=newcur(i);lastOn=i;cand=0}
-    else if(mode==='sing'&&cur.p.length>=4&&steady(i)){
-      var c=center(cur),dv=sm[i]-c;
-      if(cand===0){if(Math.abs(dv)>=P.devSemi){cand=1;candStart=i;candDir=dv>0?1:-1}}
+    var voiced=!isNaN(sm[i]),L=loud(i);
+    if(cur&&L&&onset(i)&&i-cur.s>=8&&i-lastOn>=8){ // 音量の立ち上がりは、声の高さが取れなくても見る
+      close(i,'onset');miss=0;gap=0;if(voiced||mode==='speak')start(i);else lastOn=i}
+    if(mode!=='speak'&&L&&!voiced&&cur){ // 音量はあるのに声の高さだけ取れない：50ms までは切らない
+      if(miss===0)missStart=i;miss++;gap=0;
+      if(miss>P.f0Bridge){close(missStart,'f0');miss=0}
+      i++;continue}
+    var act=mode==='speak'?L:(L&&voiced);
+    if(!act){miss=0;gap++;if(cur&&gap>=gapMax)close(i-gap+1,'gap');i++;continue}
+    gap=0;miss=0;
+    if(!cur)start(i);
+    if(mode==='sing'&&voiced&&cur.idx.length>=4&&steady(i)){
+      var c=center(cur.idx),dv=sm[i]-c;
+      if(cand===0){if(Math.abs(dv)>=P.devSemi){cand=1;candStart=i;candDir=dv>0?1:-1;hold=[i];i++;continue}}
       else{
-        if(Math.abs(dv)<=P.relSemi||(dv>0)!==(candDir>0))cand=0; // 元の高さに戻った：取り消し
-        else if(Math.abs(dv)>=P.devSemi*0.75)cand++;
-        if(cand>=P.devFrames){
-          var k=candStart;while(k-1>cur.s+3&&slope(k-1)>P.slope/2)k--; // すべり始めまでさかのぼって区切る
-          close(k,'pitch');cur=newcur(k);
-          for(var j=k;j<=i;j++)if(!isNaN(sm[j])){cur.p.push(sm[j]);if(steady(j))cur.q.push(sm[j])}
-          cand=0;lastOn=k;i++;continue;
-        }
+        if(Math.abs(dv)<=P.relSemi||(dv>0)!==(candDir>0)){cur.idx=cur.idx.concat(hold);hold=[];cand=0} // 元の高さに戻った：取り消して、たまっていた分を戻す
+        else{
+          hold.push(i);if(Math.abs(dv)>=P.holdSemi)cand++;
+          if(cand>=P.devFrames){
+            var k=candStart;while(k-1>cur.s+3&&slope(k-1)>P.slope/2)k--; // すべり始めまでさかのぼって区切る
+            var moved=cur.idx.filter(function(j){return j>=k}).concat(hold);
+            cur.idx=cur.idx.filter(function(j){return j<k});hold=[];
+            close(k,'pitch');start(k);cur.idx=moved;i++;continue}
+          i++;continue}
       }
-    }
-    if(voiced&&cand===0){cur.p.push(sm[i]);if(steady(i))cur.q.push(sm[i])} // 候補が出ている間は、今の音の中心を動かさない
-    else if(voiced&&cand>0)cur.hold.push(i);
+    }else if(cand>0&&voiced){hold.push(i);i++;continue}
+    if(voiced)cur.idx.push(i);
     i++;
   }
   close(n-gap,'end');
-  notes.forEach(function(nt){ // 取り消しになった候補のフレームも、最後に中心の計算へ戻す
-    nt.hold.forEach(function(j){if(j<nt.e&&!isNaN(sm[j])){nt.p.push(sm[j]);if(steady(j))nt.q.push(sm[j])}});
-    nt.c=mode==='sing'?center(nt):fixPitch});
-  if(mode==='speak')notes=notes.filter(function(nt){return nt.p.length>=3}); // 母音（声の高さ）がほとんどない区間は、息や雑音とみなす
+  notes.forEach(function(nt){nt.c=mode==='sing'?center(nt.idx):fixPitch});
+  if(mode==='speak')notes=notes.filter(function(nt){return nt.idx.length>=3}); // 母音（声の高さ）がほとんどない区間は、息や雑音とみなす
   var minF=Math.round(P.minLen/hop),changed=true;
-  while(changed){ // 短い音は、つながっている隣のうち高さの近いほうへまとめる
+  while(changed&&mode==='sing'){ // 短い音は「音の高さで分けた切れ目」の向こうの、高さの近い音へだけまとめる
     changed=false;
     for(var a=0;a<notes.length;a++){
       var nt=notes[a];if(nt.e-nt.s>=minF)continue;
-      var nb=[];if(a>0&&nt.s-notes[a-1].e<=3)nb.push(notes[a-1]);if(a+1<notes.length&&notes[a+1].s-nt.e<=3)nb.push(notes[a+1]);
-      var ok=nb.filter(function(x){return mode==='speak'||(!isNaN(x.c)&&!isNaN(nt.c)&&Math.abs(x.c-nt.c)<=P.mergeSemi)});
-      if(!ok.length){if(nt.e-nt.s<6){notes.splice(a,1);changed=true;break}continue} // 60ms 未満で孤立：雑音とみなす
-      var t=ok[0];if(mode==='sing'&&ok.length>1&&Math.abs(ok[1].c-nt.c)<Math.abs(ok[0].c-nt.c))t=ok[1];
-      t.s=Math.min(t.s,nt.s);t.e=Math.max(t.e,nt.e);notes.splice(a,1);changed=true;break;
+      var nb=[];
+      if(a>0&&notes[a-1].why==='pitch'&&notes[a-1].e===nt.s)nb.push(notes[a-1]);
+      if(a+1<notes.length&&nt.why==='pitch'&&notes[a+1].s===nt.e)nb.push(notes[a+1]);
+      var ok=nb.filter(function(x){return !isNaN(x.c)&&!isNaN(nt.c)&&Math.abs(x.c-nt.c)<=P.mergeSemi});
+      if(!ok.length)continue;
+      var t=ok[0];if(ok.length>1&&Math.abs(ok[1].c-nt.c)<Math.abs(ok[0].c-nt.c))t=ok[1];
+      if(a>0&&t===notes[a-1]){t.e=nt.e;t.why=nt.why}else t.s=nt.s;
+      t.idx=t.idx.concat(nt.idx);notes.splice(a,1);changed=true;break;
     }
   }
+  notes=notes.filter(function(nt){return nt.e-nt.s>=6||mode==='speak'}); // 孤立した 60ms 未満は雑音とみなす
   return notes.filter(function(nt){return mode==='speak'||!isNaN(nt.c)}).map(function(nt){
     return {start:nt.s*hop,end:nt.e*hop,pitch:mode==='speak'?fixPitch:Math.round(nt.c),lyric:''}});
 }
