@@ -57,7 +57,7 @@ button:disabled{opacity:.45;cursor:default}
 <body>
 <header>
 <h1>うたいれ</h1>
-<p class="lead"><span class="ver">v7.3</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
+<p class="lead"><span class="ver">v7.4</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
 <ol class="steps">
 <li>歌詞を<b>ひらがな</b>で入れる（空のままでも、録音した声から自動で入ります）</li><li>「録音」を押して歌う → 「停止」</li><li>ピアノロールで確認・手直し → 「MIDIを保存」</li>
 </ol>
@@ -346,7 +346,7 @@ if(typeof module!=='undefined')module.exports=Core;
 const $=id=>document.getElementById(id);
 const NAMES=['ド','ド#','レ','レ#','ミ','ファ','ファ#','ソ','ソ#','ラ','ラ#','シ'];
 const nn=p=>NAMES[p%12]+(Math.floor(p/12)-1);
-for(let p=55;p<=79;p++){const o=document.createElement('option');o.value=p;o.textContent=nn(p);if(p===67)o.selected=true;$('fix').appendChild(o)}
+for(let p=55;p<=79;p++){const o=document.createElement('option');o.value=p;o.textContent=nn(p)+(p===60?'（中央のド）':'');if(p===60)o.selected=true;$('fix').appendChild(o)} // 最初は中央のド（MIDI 60。ヤマハ式では C3）
 let origin=0; // 拍の線とMIDIの拍の基準（秒）。解析したときの最初の音符の位置
 let audioCtx=null,audio=null,sr=0,F=null,notes=[],sel=-1,hist=[],rec=null,stream=null,an=null,raf=0,player=null;
 const mode=()=>document.querySelector('input[name=mode]:checked').value;
