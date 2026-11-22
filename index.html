@@ -57,7 +57,7 @@ button:disabled{opacity:.45;cursor:default}
 <body>
 <header>
 <h1>うたいれ</h1>
-<p class="lead"><span class="ver">v7.5</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
+<p class="lead"><span class="ver">v8</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
 <ol class="steps">
 <li>歌詞を<b>ひらがな</b>で入れる（空のままでも、録音した声から自動で入ります）</li><li>「録音」を押して歌う → 「停止」</li><li>ピアノロールで確認・手直し → 「MIDIを保存」</li>
 </ol>
@@ -101,6 +101,7 @@ button:disabled{opacity:.45;cursor:default}
 <div class="row" style="margin-top:10px">
 <button id="reBtn" disabled>設定を変えて解析しなおす</button>
 <button id="flowBtn" disabled>歌詞を流し込み直す</button>
+<button id="alignBtn" disabled class="main" title="歌詞の一文字ずつの音（子音の種類）を手がかりに、文字の数ちょうどに区切り直します">歌詞で区切る</button>
 <button id="fitBtn" disabled title="歌詞の音の数に合わせて、音量の谷で音符を分けたり、近い音をまとめたりします">音符の数を歌詞に合わせる</button>
 <button id="playBtn" disabled>▶ 音符を試聴</button>
 <button id="origBtn" disabled>▶ 録音を再生</button>
@@ -353,7 +354,129 @@ function fitCount(notes,F,target,keepPitch){ // keepPitch：しゃべりモー�
   }
   return {notes:notes,split:log.split,merge:log.merge};
 }
-return {frames:frames,segment:segment,fitCount:fitCount,toMora:toMora,toTicks:toTicks,barBase:barBase,midiBytes:midiBytes,yin:yin};
+// SMALL・pct・median はこの下で使う
+// ===== 歌詞で区切る（簡易の強制アライメント。Python の試作 align2.py と同じ手順）=====
+// 歌詞の各文字の頭の音（子音の種類）から、切れ目が声のどこに出やすいかを決め、
+// 文字の数ちょうどの区切りを、手がかりの合計がいちばん大きくなるように選ぶ（動的計画法）。
+// 手がかり：D=音量の谷、R=無声（息の音）からの復帰、P=安定した音高の段差、C=声の響き（スペクトルの形）の変化
+// 文字の種類：U=か・さ・た・は・ぱ行 / B=が・ざ・だ・ば行 / S=な・ま・や・ら・わ行 / V=前と違う母音 / W=同じ母音・ー / N=ん / Q=っ
+var KANA_ROWS=[['あいうえお','','aiueo'],['かきくけこ','k','aiueo'],['さしすせそ','s','aiueo'],['たちつてと','t','aiueo'],['なにぬねの','n','aiueo'],['はひふへほ','h','aiueo'],
+  ['まみむめも','m','aiueo'],['やゆよ','y','auo'],['らりるれろ','r','aiueo'],['わを','w','ao'],['がぎぐげご','g','aiueo'],['ざじずぜぞ','z','aiueo'],
+  ['だぢづでど','d','aiueo'],['ばびぶべぼ','b','aiueo'],['ぱぴぷぺぽ','p','aiueo']];
+var KANA={};KANA_ROWS.forEach(function(r){for(var i=0;i<r[0].length;i++)KANA[r[0][i]]=[r[1],r[2][i]]});
+var SMALLV={'ぁ':'a','ぃ':'i','ぅ':'u','ぇ':'e','ぉ':'o','ゃ':'a','ゅ':'u','ょ':'o','ゎ':'a'};
+function lyricUnits(text){ // toMora と同じ区切り方で、空白（句の切れ目）の位置も覚える
+  var s='',out=[],phrase={};
+  for(var ch of text){var c=ch.charCodeAt(0);if(c>=0x30A1&&c<=0x30F6)ch=String.fromCharCode(c-0x60);s+=ch}
+  for(var ch2 of s){
+    if(/\s|[、。,.!?！？「」『』・]/.test(ch2)){if(out.length)phrase[out.length]=true;continue}
+    if(ch2==='ー'||ch2==='-'||ch2==='〜'||ch2==='~'){out.push('-');continue}
+    if(SMALL.indexOf(ch2)>=0&&out.length&&out[out.length-1]!=='-'){out[out.length-1]+=ch2;continue}
+    out.push(ch2);
+  }
+  var types=[],prevV=null;
+  out.forEach(function(m){var c=m[0],t,v=null;
+    if(c==='っ')t='Q';else if(c==='ん')t='N';else if(c==='-'){t='W';v=prevV}
+    else{var k=KANA[c]||['?',null];v=k[1];if(m.length>1&&SMALLV[m[1]])v=SMALLV[m[1]];var cs=k[0];
+      if('ksthp'.indexOf(cs)>=0&&cs)t='U';else if('gzdb'.indexOf(cs)>=0&&cs)t='B';else if('nmyrw'.indexOf(cs)>=0&&cs)t='S';else if(cs==='')t=(v===prevV)?'W':'V';else t='S'}
+    types.push(t);if(v)prevV=v});
+  return {mora:out,types:types,phrase:phrase};
+}
+function pctLin(a,p){var b=a.slice().sort(function(x,y){return x-y}),n=b.length;if(!n)return NaN;var r=(n-1)*p,lo=Math.floor(r),hi=Math.ceil(r);return b[lo]+(b[hi]-b[lo])*(r-lo)} // numpy の percentile と同じ
+function medLin(a){return pctLin(a,0.5)}
+function fftMag2(re,im){ // 長さ 2 の累乗の FFT（その場で計算）
+  var n=re.length;for(var i=1,j=0;i<n;i++){var bit=n>>1;for(;j&bit;bit>>=1)j^=bit;j^=bit;if(i<j){var t=re[i];re[i]=re[j];re[j]=t;t=im[i];im[i]=im[j];im[j]=t}}
+  for(var len=2;len<=n;len<<=1){var ang=-2*Math.PI/len,wr=Math.cos(ang),wi=Math.sin(ang);
+    for(i=0;i<n;i+=len){var cr=1,ci=0;for(var k=0;k<len/2;k++){var ar=re[i+k],ai=im[i+k],br=re[i+k+len/2]*cr-im[i+k+len/2]*ci,bi=re[i+k+len/2]*ci+im[i+k+len/2]*cr;
+      re[i+k]=ar+br;im[i+k]=ai+bi;re[i+k+len/2]=ar-br;im[i+k+len/2]=ai-bi;var nr=cr*wr-ci*wi;ci=cr*wi+ci*wr;cr=nr}}}
+}
+function spectra(data,sr0,n){ // 各フレームの声の響きの形：メル帯域（16本）の対数エネルギーから全体の大きさを引いたもの
+  var k=Math.max(1,Math.round(sr0/16000)),m=Math.floor(data.length/k),x=new Float32Array(m),sr=sr0/k;
+  for(var i=0;i<m;i++){var s=0;for(var j=0;j<k;j++)s+=data[i*k+j];x[i]=s/k}
+  var H=Math.round(sr*0.01),Wn=Math.round(sr*0.04),NF=1024,win=new Float32Array(Wn);for(i=0;i<Wn;i++)win[i]=0.5-0.5*Math.cos(2*Math.PI*i/(Wn-1));
+  var mel=function(f){return 2595*Math.log10(1+f/700)},imel=function(q){return 700*(Math.pow(10,q/2595)-1)},e0=mel(150),e1=mel(4000),edges=[];
+  for(i=0;i<18;i++)edges.push(imel(e0+(e1-e0)*i/17));
+  var nb=NF/2+1,FB=[];for(var b=0;b<16;b++){var lo=edges[b],c=edges[b+1],hi=edges[b+2],w=new Float32Array(nb);
+    for(i=0;i<nb;i++){var f=i*sr/NF;w[i]=Math.max(0,Math.min((f-lo)/(c-lo),(hi-f)/(hi-c)))}FB.push(w)}
+  var out=[],re=new Float64Array(NF),im=new Float64Array(NF);
+  for(var fI=0;fI<n;fI++){var off=fI*H;if(off+Wn>m){out.push(null);continue}
+    re.fill(0);im.fill(0);for(i=0;i<Wn;i++)re[i]=x[off+i]*win[i];fftMag2(re,im);
+    var e=new Float64Array(16),mean=0;for(b=0;b<16;b++){var t=0,fb=FB[b];for(i=0;i<nb;i++)t+=fb[i]*(re[i]*re[i]+im[i]*im[i]);e[b]=Math.log(t+1e-10);mean+=e[b]}
+    mean/=16;for(b=0;b<16;b++)e[b]-=mean;out.push(e)}
+  return out;
+}
+function alignLyrics(F,text,data,sr0,fixPitch){
+  var U=lyricUnits(text),morae=U.mora,types=U.types,PHRASE=U.phrase,fr=F.fr,hop=F.hop,n=fr.length,M=morae.length;
+  if(!n||!M)return null;
+  var rms=fr.map(function(f){return f.rms}),floor=pct(rms,0.1),peak=pct(rms,0.95),th=Math.max(0.006,Math.min(floor*3,peak*0.35),peak*0.06);
+  var loud=rms.map(function(r){return r>th}),sm=fr.map(function(f,i){if(isNaN(f.midi))return NaN;var w=[];for(var j=Math.max(0,i-2);j<Math.min(n,i+3);j++)if(!isNaN(fr[j].midi))w.push(fr[j].midi);return median(w)});
+  var voiced=loud.map(function(l,i){return l&&!isNaN(sm[i])}),db=rms.map(function(r){return 20*Math.log10(r+1e-9)});
+  var runs=[],i=0;while(i<n){if(voiced[i]){var j=i;while(j<n&&(voiced[j]||(j+1<n&&voiced[j+1])))j++;if(j-i>=6)runs.push([i,j]);i=j}else i++}
+  if(!runs.length)return null;
+  var A=runs[0][0],B=runs[runs.length-1][1];
+  var S=data?spectra(data,sr0,n):null;
+  var D=new Float64Array(n),R=new Float64Array(n),P=new Float64Array(n),Craw=new Float64Array(n),C=new Float64Array(n);
+  function sl(arr,a,b){return arr.slice(Math.max(0,a),Math.max(0,Math.min(n,b)))}
+  for(var t=0;t<n;t++){
+    var L=sl(db,t-10,Math.max(0,t-4)),Rr=db.slice(Math.min(n,t+2),Math.min(n,t+8)),mid=sl(db,t-4,t+1);
+    if(L.length&&Rr.length&&mid.length)D[t]=Math.max(0,Math.min(1,(Math.min(medLin(L),medLin(Rr))-pctLin(mid,0.2)-2)/8));
+    var a=voiced.slice(Math.max(0,t-7),Math.max(0,t-1)),b=voiced.slice(Math.min(n,t+1),Math.min(n,t+8));
+    if(a.length&&b.length){var av=0,bv=0;a.forEach(function(x){av+=x?1:0});b.forEach(function(x){bv+=x?1:0});R[t]=(1-av/a.length)*(bv/b.length)}
+    var li=[],ri=[];for(j=Math.max(0,t-11);j<Math.max(0,t-2);j++)if(voiced[j])li.push(j);for(j=Math.min(n,t+2);j<Math.min(n,t+11);j++)if(voiced[j])ri.push(j);
+    var l=li.map(function(q){return sm[q]}),r=ri.map(function(q){return sm[q]});
+    if(l.length>=4&&r.length>=4&&pctLin(l,0.75)-pctLin(l,0.25)<=1&&pctLin(r,0.75)-pctLin(r,0.25)<=1)P[t]=Math.max(0,Math.min(1,(Math.abs(medLin(r)-medLin(l))-0.5)/1.5));
+    if(S&&li.length>=3&&ri.length>=3&&li.every(function(q){return S[q]})&&ri.every(function(q){return S[q]})){
+      var d2=0;for(var bb=0;bb<16;bb++){var ml=0,mr=0;li.forEach(function(q){ml+=S[q][bb]});ri.forEach(function(q){mr+=S[q][bb]});var df=ml/li.length-mr/ri.length;d2+=df*df}Craw[t]=Math.sqrt(d2)}
+  }
+  if(S){var vals=[];for(t=0;t<n;t++)if(voiced[t]&&Craw[t]>0)vals.push(Craw[t]);
+    if(vals.length>10){var q50=pctLin(vals,0.5),q90=pctLin(vals,0.9);for(t=0;t<n;t++)C[t]=Math.max(0,Math.min(1,(Craw[t]-q50)/(q90-q50+1e-9)))}}
+  var silStart=new Uint8Array(n);for(t=1;t<n-3;t++)silStart[t]=loud[t-1]&&!loud[t]&&!loud[t+1]&&!loud[t+2]?1:0; // 声が止まって無音（30ms 以上）が始まる所
+  var longStart=new Uint8Array(n);for(t=1;t<n;t++)if(loud[t-1]&&!loud[t]){j=t;while(j<n&&!loud[j])j++;longStart[t]=j-t>=15?1:0}
+  function bscore0(t,ty){
+    if(ty==='U')return 1.2*R[t]+0.5*D[t]+0.2*P[t];
+    if(ty==='B')return 0.8*D[t]+0.5*C[t]+0.25*P[t]+0.3*R[t];
+    if(ty==='S')return 0.4*D[t]+0.8*C[t]+0.25*P[t];
+    if(ty==='V')return 1.1*C[t]+0.25*P[t]+0.2*D[t];
+    if(ty==='W')return 0.55*P[t]+0.45*D[t];
+    if(ty==='N')return 0.8*C[t]+0.35*D[t]+0.15*P[t];
+    if(ty==='Q')return 0.4*D[t]+0.6*R[t];
+    return D[t]}
+  function bscore(t,ty){if(silStart[t])return 2.0;if(!loud[t]&&t>0&&!loud[t-1])return -1.0;return bscore0(t,ty)} // 休みの始まりは強い切れ目。無音の途中には置かない
+  var longSil=new Float64Array(n+1),k=0;while(k<n){if(!loud[k]){j=k;while(j<n&&!loud[j])j++;if(j-k>=18&&k>A&&j<B)longSil[k]=1;k=j}else k++}
+  var cs=new Float64Array(n+1),vc=new Float64Array(n+1);for(t=0;t<n;t++){cs[t+1]=cs[t]+longSil[t];vc[t+1]=vc[t]+(voiced[t]?1:0)}
+  var firstLoud=new Int32Array(n+1),lastLoud=new Int32Array(n+1);firstLoud[n]=n;for(t=n-1;t>=0;t--)firstLoud[t]=loud[t]?t:firstLoud[t+1];
+  lastLoud[0]=-1;for(t=0;t<n;t++)lastLoud[t+1]=loud[t]?t:lastLoud[t];
+  var mu=Math.max(0.06,(vc[B]-vc[A])*hop/M),sig=0.65;
+  function segscore(a,b,ty){ // 区間の前後の無音は削って、実際に声のある長さで評価する
+    var a2=firstLoud[a],b2=lastLoud[b]+1;if(a2>=b2)return -50;var pen=0;
+    if(cs[b2]-cs[Math.min(a2+1,b2)]>0)pen-=8; // 長い休みをまたぐ音符はだめ
+    var dur=(b2-a2)*hop,v=vc[b2]-vc[a2],m_=mu*(ty==='Q'?0.6:1),s_=ty==='Q'?0.8:sig,lg=Math.log(dur/m_)/s_;
+    pen+=-0.5*lg*lg;var cap=Math.max(0.8,3*mu);if(dur>cap)pen-=(dur-cap)*2;if(v<3&&ty!=='Q')pen-=2;return pen}
+  var minF=6,maxF=Math.floor(Math.max(3,8*mu)/hop);
+  var dpS=[new Map([[A,0]])],dpA=[new Map([[A,-1]])];
+  for(k=1;k<=M;k++){
+    var last=k===M,cand=[];if(last)cand=[B];else for(t=A+minF*k;t<=B-minF*(M-k);t++)cand.push(t);
+    var prev=Array.from(dpS[k-1].entries()).sort(function(x,y){return x[0]-y[0]}),curS=new Map(),curA=new Map();
+    cand.forEach(function(t){
+      var b=last?0:bscore(t,types[k]);if(!last&&PHRASE[k])b+=longStart[t]?1:-0.5; // 歌詞の空白のあとは、休みのあとに始まりやすい
+      var best=-1e18,arg=-1;
+      for(var z=0;z<prev.length;z++){var q=prev[z][0];if(q>t-minF)break;if(t-q>maxF)continue;var v=prev[z][1]+segscore(q,t,types[k-1])+b;if(v>best){best=v;arg=q}}
+      if(arg>=0){curS.set(t,best);curA.set(t,arg)}});
+    dpS.push(curS);dpA.push(curA);
+  }
+  if(!dpS[M].has(B))return null;
+  var bounds=[B];t=B;for(k=M;k>0;k--){t=dpA[k].get(t);bounds.push(t)}bounds.reverse();
+  var out=[];
+  for(k=0;k<M;k++){var a3=bounds[k],b3=bounds[k+1],s2=firstLoud[a3]<b3?firstLoud[a3]:a3,e2=Math.max(s2+1,lastLoud[b3]+1);
+    var st=[],al=[];for(j=s2;j<e2;j++)if(voiced[j]){al.push(sm[j]);if(j>0&&j<n-1&&!isNaN(sm[j-1])&&!isNaN(sm[j+1])&&Math.abs(sm[j+1]-sm[j-1])/2<=0.06)st.push(sm[j])}
+    var c=al.length?median(st.length>=3?st:al):NaN;
+    out.push({start:s2*hop,end:e2*hop,pitch:fixPitch!=null?fixPitch:(isNaN(c)?null:Math.round(c)),lyric:morae[k],cut:'lyric',
+      weak:k>0&&bscore(a3,types[k])<0.25&&firstLoud[bounds[k-1]]<a3&&lastLoud[a3]+1>=a3});
+  }
+  out.forEach(function(o,k){if(o.pitch==null)o.pitch=k?out[k-1].pitch:60}); // 声の高さが取れなかった音（っ など）は前の音の高さ
+  return out;
+}
+return {frames:frames,segment:segment,fitCount:fitCount,alignLyrics:alignLyrics,lyricUnits:lyricUnits,toMora:toMora,toTicks:toTicks,barBase:barBase,midiBytes:midiBytes,yin:yin};
 })();
 if(typeof module!=='undefined')module.exports=Core;
 </script>
@@ -374,7 +497,7 @@ function status(t,bad,html){const s=$('st');if(html)s.innerHTML=t;else s.textCon
 const tempo=()=>{const v=+$('bpm').value;return !Number.isFinite(v)||v<=0?120:Math.min(240,Math.max(40,v))};
 // ピアノロールの幅がブラウザの上限（約32000px）を超えないよう、長い録音では拡大を自動で抑える
 const pxsNow=()=>{if(drag)return drag.pxs;const dur=Math.max(audio?audio.length/sr:4,4,...notes.map(n=>n.end+1));return Math.min(+$('zoom').value,(30000-60)/dur)};
-function updBtns(){['flowBtn','playBtn','saveBtn','fitBtn'].forEach(id=>$(id).disabled=!notes.length)}
+function updBtns(){['flowBtn','playBtn','saveBtn','fitBtn'].forEach(id=>$(id).disabled=!notes.length);$('alignBtn').disabled=!audio}
 function snap(){hist.push(JSON.stringify(notes));if(hist.length>50)hist.shift();$('undoBtn').disabled=false}
 function flow(){const r=Core.toMora($('lyr').value);notes.forEach((n,i)=>n.lyric=r.mora[i]||'-');return r}
 function report(){
@@ -392,6 +515,7 @@ function analyze(){
     notes=Core.segment(F,mode(),+$('fix').value);origin=notes.length?notes[0].start:0;hist=[];$('undoBtn').disabled=true;sel=-1;
     if(!notes.length){status('声が見つかりませんでした。マイクに近づいて、もう少し大きな声で試してください。',true)}
     else{flow();report()}
+    $('alignBtn').disabled=!audio;
     ['reBtn','flowBtn','fitBtn','playBtn','origBtn','saveBtn'].forEach(id=>$(id).disabled=!notes.length&&id!=='origBtn');
     $('origBtn').disabled=false;draw();selUI();scrollToNotes();
   },20);
@@ -636,6 +760,22 @@ $('diagCopy').onclick=async()=>{const t=navigator.userAgent+'\n'+diag.join('\n')
 document.querySelectorAll('input[name=mode]').forEach(r=>r.onchange=()=>{$('fixw').style.opacity=mode()==='speak'?1:.5;if(audio)analyze()});
 $('fixw').style.opacity=.5;
 $('flowBtn').onclick=()=>{snap();flow();report();draw();selUI()};
+$('alignBtn').onclick=()=>{
+  if(drag||loading||!audio)return;
+  const mr=Core.toMora($('lyr').value),m=mr.mora.length;
+  if(!m){status('先に歌詞を入れてください（声から歌詞を入れても大丈夫です）。',true);return}
+  if(mr.bad){status('歌詞にひらがなでない文字があります（'+mr.bad.slice(0,10)+'）。ひらがなに直してから押してください。',true);return}
+  if(!F)F=Core.frames(audio,sr);
+  status('歌詞に合わせて区切っています…');const gen=lyrGen,aid=audioId;
+  setTimeout(()=>{
+    if(gen!==lyrGen||aid!==audioId)return; // 待つ間に歌詞や音声が変わった
+    const res=Core.alignLyrics(F,$('lyr').value,audio,sr,mode()==='speak'?+$('fix').value:null);
+    if(!res){status('歌詞に合わせて区切れませんでした（声が短すぎる、または歌詞が多すぎます）。',true);return}
+    stopPlay();snap();notes=res;sel=-1;lyrGen++;flow();report();updBtns();draw();selUI();
+    const w=res.filter(n=>n.weak).length;
+    hearSt(`歌詞の ${m} 音に合わせて区切りました。`+(w?`点線の ${w} 個は切れ目の手がかりが弱い所です。▶で聞いて、ずれていたらドラッグで直してください。`:'')+' 「元に戻す」で戻せます。');
+  },30);
+};
 $('fitBtn').onclick=()=>{
   if(drag||loading)return;
   const mr=Core.toMora($('lyr').value),m=mr.mora.length;
@@ -748,6 +888,7 @@ function draw(){
     g.fillStyle=i===sel?css('--acc2'):css('--acc');g.globalAlpha=bad.has(n)?.6:.9;g.fillRect(x,y+1,w,RH-2);g.globalAlpha=1;
     if(w>=12){g.fillStyle='rgba(255,255,255,.55)';g.fillRect(x+w-3,y+3,2,RH-6)} // 右端のつまみ（ここを引くと長さが変わる）
     g.fillStyle='#fff';g.font='bold 12px sans-serif';g.fillText(n.lyric,x+3,y+12);
+    if(n.weak){g.strokeStyle=css('--ink');g.lineWidth=1.5;g.setLineDash([2,3]);g.beginPath();g.moveTo(x+.5,y);g.lineTo(x+.5,y+RH);g.stroke();g.setLineDash([]);g.lineWidth=1} // 切れ目に自信がない（左端を点線）
     if(bad.has(n)){g.strokeStyle=css('--warn');g.lineWidth=1.5;g.setLineDash([3,2]);g.strokeRect(x+.5,y+1.5,w-1,RH-3);g.setLineDash([]);g.lineWidth=1}
     if(i===sel){g.strokeStyle=css('--ink');g.lineWidth=2;g.strokeRect(x,y+1,w,RH-2);g.lineWidth=1;
       if(w<12){g.fillStyle=css('--ink');g.fillRect(x+w+1,y+3,4,RH-6)}}}); // 短い音符は、選ぶと右外に長さのつまみが出る
@@ -818,7 +959,7 @@ function endDrag(e){
   if(!drag||e.pointerId!==drag.id)return;const d=drag;drag=null;
   if(d.moved){hist.push(d.before);if(hist.length>50)hist.shift();$('undoBtn').disabled=false; // 確定したときだけ元に戻す記録を残す
     notes.sort((a,b)=>a.start-b.start);sel=notes.indexOf(d.n);
-    if(d.mode==='len'||d.hmoved){delete d.n.cut;if(d.prev)delete d.prev.cut;if(sel>0)delete notes[sel-1].cut} // 時間を動かしたら、まわりの切れ目の理由は消すlyrGen++;report();updBtns();draw();selUI()}
+    if(d.mode==='len'||d.hmoved){delete d.n.weak;delete d.n.cut;if(d.prev)delete d.prev.cut;if(sel>0)delete notes[sel-1].cut} // 時間を動かしたら、まわりの切れ目の理由は消すlyrGen++;report();updBtns();draw();selUI()}
   else{draw();blip(d.n.pitch)} // タップだけなら音を鳴らして選ぶ
 }
 function cancelDrag(e){
