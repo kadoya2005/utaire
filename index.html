@@ -476,7 +476,7 @@ function alignLyrics(F,text,data,sr0,fixPitch){
   out.forEach(function(o,k){if(o.pitch==null)o.pitch=k?out[k-1].pitch:60}); // 声の高さが取れなかった音（っ など）は前の音の高さ
   return out;
 }
-return {frames:frames,segment:segment,fitCount:fitCount,alignLyrics:alignLyrics,lyricUnits:lyricUnits,toMora:toMora,toTicks:toTicks,barBase:barBase,midiBytes:midiBytes,yin:yin};
+return {frames:frames,segment:segment,fitCount:fitCount,alignLyrics:alignLyrics,lyricUnits:lyricUnits,spectra:spectra,toMora:toMora,toTicks:toTicks,barBase:barBase,midiBytes:midiBytes,yin:yin};
 })();
 if(typeof module!=='undefined')module.exports=Core;
 </script>
