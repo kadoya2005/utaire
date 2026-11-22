@@ -57,7 +57,7 @@ button:disabled{opacity:.45;cursor:default}
 <body>
 <header>
 <h1>うたいれ</h1>
-<p class="lead"><span class="ver">v6</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
+<p class="lead"><span class="ver">v6.1</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
 <ol class="steps">
 <li>歌詞を<b>ひらがな</b>で入れる（空のままでも、録音した声から自動で入ります）</li><li>「録音」を押して歌う → 「停止」</li><li>ピアノロールで確認・手直し → 「MIDIを保存」</li>
 </ol>
@@ -145,15 +145,22 @@ function downsample(data,sr){
   for(var i=0;i<n;i++){var s=0;for(var j=0;j<k;j++)s+=data[i*k+j];o[i]=s/k}
   return {x:o,sr:sr/k};
 }
+function loudGain(x,sr){ // 小さい声でも拾えるよう、声の大きさを一定にそろえる倍率（最大40倍＝約32dB）
+  var blk=Math.max(1,Math.round(sr*0.02)),r=[];
+  for(var o=0;o+blk<=x.length;o+=blk){var e=0;for(var j=0;j<blk;j++)e+=x[o+j]*x[o+j];r.push(Math.sqrt(e/blk))}
+  var loud=pct(r,0.95); // 大きいほうの5%（＝声が出ているところ）の大きさ
+  return loud>1e-6?Math.max(1,Math.min(40,0.15/loud)):1; // 大きい声はそのまま、小さい声だけ持ち上げる
+}
 function frames(data,sr0){
   var ds=downsample(data,sr0),x=ds.x,sr=ds.sr,hop=Math.round(sr*0.01),W=Math.round(sr*0.04);
+  var gain=loudGain(x,sr);if(gain>1)for(var q=0;q<x.length;q++)x[q]*=gain;
   var maxLag=Math.floor(sr/65)+1,out=[];
   for(var off=0;off+W+maxLag<x.length;off+=hop){
     var e=0;for(var j=0;j<W;j++)e+=x[off+j]*x[off+j];var rms=Math.sqrt(e/W);
     var p=rms>0.004?yin(x,off,W,sr,65,1100):{f:0,c:1};
     out.push({t:off/sr,rms:rms,midi:p.f>0?69+12*Math.log2(p.f/440):NaN});
   }
-  return {fr:out,hop:hop/sr};
+  return {fr:out,hop:hop/sr,gain:gain};
 }
 function pct(a,p){var b=a.slice().sort(function(u,v){return u-v});return b[Math.min(b.length-1,Math.floor(b.length*p))]||0}
 function median(a){var b=a.slice().sort(function(u,v){return u-v});return b.length?b[b.length>>1]:NaN}
@@ -280,7 +287,7 @@ function analyze(){
   if(!audio)return;
   status('解析中…');
   setTimeout(()=>{
-    F=F||Core.frames(audio,sr);
+    if(!F){F=Core.frames(audio,sr);if(F.gain>1.05)dlog('声が小さめなので '+F.gain.toFixed(1)+' 倍にそろえて解析')}
     notes=Core.segment(F,mode(),+$('fix').value);origin=notes.length?notes[0].start:0;hist=[];$('undoBtn').disabled=true;sel=-1;
     if(!notes.length){status('声が見つかりませんでした。マイクに近づいて、もう少し大きな声で試してください。',true)}
     else{flow();report()}
@@ -444,7 +451,7 @@ $('recBtn').onclick=async()=>{
     const src=ctx().createMediaStreamSource(ms),myAn=ctx().createAnalyser();myAn.fftSize=2048;src.connect(myAn);
     const buf=new Float32Array(myAn.fftSize);
     const tick=()=>{if(myRaf<0)return;myAn.getFloatTimeDomainData(buf);let e=0;for(const v of buf)e+=v*v;const r=Math.sqrt(e/buf.length);
-      $('lvl').style.width=Math.min(100,r*400)+'%';
+      $('lvl').style.width=Math.max(0,Math.min(100,(20*Math.log10(r+1e-9)+60)*2))+'%'; // -60dB で0、-10dB で満タン
       if(r>0.01){const p=Core.yin(buf,0,1024,ctx().sampleRate,65,1100);$('live').textContent=p.f?nn(Math.round(69+12*Math.log2(p.f/440))):'…'}else $('live').textContent='—';
       if(myRaf>=0)myRaf=requestAnimationFrame(tick)};
     mr.start();rec=mr;tick();dlog('録音開始 '+(mr.mimeType||'形式不明'));status('録音中… 歌い終わったら「停止」を押してください。');
