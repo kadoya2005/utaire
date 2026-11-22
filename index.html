@@ -57,7 +57,7 @@ button:disabled{opacity:.45;cursor:default}
 <body>
 <header>
 <h1>うたいれ</h1>
-<p class="lead"><span class="ver">v6.3</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
+<p class="lead"><span class="ver">v7</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
 <ol class="steps">
 <li>歌詞を<b>ひらがな</b>で入れる（空のままでも、録音した声から自動で入ります）</li><li>「録音」を押して歌う → 「停止」</li><li>ピアノロールで確認・手直し → 「MIDIを保存」</li>
 </ol>
@@ -80,9 +80,9 @@ button:disabled{opacity:.45;cursor:default}
 <label><input type="radio" name="mode" value="sing" checked> 歌（高さ＋長さ）</label>
 <label><input type="radio" name="mode" value="speak"> しゃべり（長さだけ）</label>
 </div>
-<label>テンポ <input type="number" id="bpm" value="120" min="40" max="240"></label>
+<label>テンポ（曲のBPM） <input type="number" id="bpm" value="120" min="40" max="240"></label><button type="button" id="tapBtn" title="曲に合わせて4回以上たたくと、テンポが入ります">タップ</button>
 <label>そろえる <select id="q"><option value="0">しない</option><option value="240">8分</option><option value="120" selected>16分</option><option value="60">32分</option></select></label>
-<label><input type="checkbox" id="legato" checked> 音符をすき間なくつなぐ</label>
+<label><input type="checkbox" id="legato" checked> 音符の小さなすき間をつなぐ</label>
 <label id="fixw">しゃべりの音の高さ <select id="fix"></select></label>
 </div>
 </section>
@@ -165,41 +165,78 @@ function frames(data,sr0){
 }
 function pct(a,p){var b=a.slice().sort(function(u,v){return u-v});return b[Math.min(b.length-1,Math.floor(b.length*p))]||0}
 function median(a){var b=a.slice().sort(function(u,v){return u-v});return b.length?b[b.length>>1]:NaN}
+var SEG={slope:0.06,devSemi:0.8,relSemi:0.4,devFrames:12,gapMax:3,f0Bridge:5,onsetDb:6,minLen:0.12,mergeSemi:2};
+// v7 の区切り方（作者の録音3本で調整。Python の試作 seg3.py と同じ結果になる）
+// ・音量の切れ目（無音）と立ち上がりで音節を区切る。音量はあって声の高さだけ一瞬取れないときは 50ms まで橋渡し
+// ・音節の中で音が変わったとみなすのは、丸める前の値で今の音の中心から 0.8 半音以上ずれた状態が 120ms 続いたとき
+//   （候補が出ている間は中心を動かさない。0.4 半音以内に戻ったら取り消し）
+// ・声のすべり（しゃくり・ずり下げ）は音の高さの計算に使わない
+// ・0.12 秒未満の音は、つながっている隣のうち高さの近いほう（2 半音以内）へまとめる
 function segment(F,mode,fixPitch){
-  var fr=F.fr,hop=F.hop,n=fr.length;if(!n)return [];
+  var P=SEG,fr=F.fr,hop=F.hop,n=fr.length;if(!n)return [];
   var rmsArr=fr.map(function(f){return f.rms});
   var floor=pct(rmsArr,0.1),peak=pct(rmsArr,0.95);
   var th=Math.max(0.006,Math.min(floor*3,peak*0.35),peak*0.06); // 休みの少ない録音では floor が声の大きさになるので、上限をつける
   var db=rmsArr.map(function(r){return 20*Math.log10(r+1e-9)});
   var sm=fr.map(function(f,i){ // 高さを5フレームの中央値でならす
     if(isNaN(f.midi))return NaN;var w=[];for(var k=-2;k<=2;k++){var g=fr[i+k];if(g&&!isNaN(g.midi))w.push(g.midi)}return median(w)});
-  var active=function(i){return mode==='speak'?fr[i].rms>th:(fr[i].rms>th&&!isNaN(sm[i]))};
-  var onset=function(i){if(i<4)return false;var m=Infinity;for(var k=1;k<=4;k++)m=Math.min(m,db[i-k]);return db[i]-m>(mode==='speak'?7:6)&&fr[i].rms>th};
-  var notes=[],cur=null,gap=0,dev=0,devStart=0,lastOn=-99,gapMax=mode==='speak'?5:3;
-  function close(endF){if(cur){cur.e=endF;notes.push(cur);cur=null}}
-  for(var i=0;i<n;i++){
-    if(!active(i)){gap++;if(cur&&gap>=gapMax)close(i-gap+1);continue}
-    gap=0;
-    if(!cur){cur={s:i,p:[]};lastOn=i;dev=0}
-    else if(onset(i)&&i-cur.s>=8&&i-lastOn>=8){close(i);cur={s:i,p:[]};lastOn=i;dev=0}
-    else if(mode==='sing'&&cur.p.length>=4){
-      var c=Math.round(median(cur.p));
-      if(Math.abs(Math.round(sm[i])-c)>=1){if(dev===0)devStart=i;dev++;
-        if(dev>=7){close(devStart);cur={s:devStart,p:[]};for(var k2=devStart;k2<=i;k2++)if(!isNaN(sm[k2]))cur.p.push(sm[k2]);dev=0;lastOn=devStart;continue}}
-      else dev=0;
+  function slope(i){if(i<1||i>=n-1||isNaN(sm[i-1])||isNaN(sm[i+1]))return NaN;return Math.abs(sm[i+1]-sm[i-1])/2}
+  function steady(i){if(isNaN(sm[i]))return false;var s=slope(i);return !(s>P.slope)}
+  function loud(i){return rmsArr[i]>th}
+  function onset(i){if(i<4)return false;var m=Infinity;for(var k=1;k<=4;k++)m=Math.min(m,db[i-k]);return db[i]-m>(mode==='speak'?7:P.onsetDb)&&rmsArr[i]>th}
+  function center(c){var q=c.q.length>=3?c.q:c.p;return q.length?median(q):NaN}
+  function newcur(s){return {s:s,p:[],q:[],hold:[]}}
+  var notes=[],cur=null,gap=0,f0miss=0,cand=0,candStart=0,candDir=0,lastOn=-99,gapMax=mode==='speak'?5:P.gapMax;
+  function close(e,why){if(cur){cur.e=e;cur.why=why;notes.push(cur);cur=null}}
+  var i=0;
+  while(i<n){
+    var voiced=!isNaN(sm[i]),act;
+    if(mode==='speak')act=loud(i);
+    else{
+      act=loud(i)&&voiced;
+      if(cur&&loud(i)&&!voiced){f0miss++;if(f0miss<=P.f0Bridge){i++;continue}} // 声の高さだけ一瞬取れない：短ければ切らない
     }
-    if(!isNaN(sm[i]))cur.p.push(sm[i]);
+    if(!act){gap++;if(cur&&gap>=gapMax){close(i-gap+1,'gap');cand=0}i++;continue}
+    gap=0;f0miss=0;
+    if(!cur){cur=newcur(i);lastOn=i;cand=0}
+    else if(onset(i)&&i-cur.s>=8&&i-lastOn>=8){close(i,'onset');cur=newcur(i);lastOn=i;cand=0}
+    else if(mode==='sing'&&cur.p.length>=4&&steady(i)){
+      var c=center(cur),dv=sm[i]-c;
+      if(cand===0){if(Math.abs(dv)>=P.devSemi){cand=1;candStart=i;candDir=dv>0?1:-1}}
+      else{
+        if(Math.abs(dv)<=P.relSemi||(dv>0)!==(candDir>0))cand=0; // 元の高さに戻った：取り消し
+        else if(Math.abs(dv)>=P.devSemi*0.75)cand++;
+        if(cand>=P.devFrames){
+          var k=candStart;while(k-1>cur.s+3&&slope(k-1)>P.slope/2)k--; // すべり始めまでさかのぼって区切る
+          close(k,'pitch');cur=newcur(k);
+          for(var j=k;j<=i;j++)if(!isNaN(sm[j])){cur.p.push(sm[j]);if(steady(j))cur.q.push(sm[j])}
+          cand=0;lastOn=k;i++;continue;
+        }
+      }
+    }
+    if(voiced&&cand===0){cur.p.push(sm[i]);if(steady(i))cur.q.push(sm[i])} // 候補が出ている間は、今の音の中心を動かさない
+    else if(voiced&&cand>0)cur.hold.push(i);
+    i++;
   }
-  close(n-gap);
-  // 短すぎる音符は前とまとめるか捨てる
-  var out=[];
-  notes.forEach(function(nt){
-    var len=nt.e-nt.s;if(len<=0)return;
-    if(len<6){var pv=out[out.length-1];if(pv&&nt.s-pv.e<=3){pv.e=nt.e;pv.p=pv.p.concat(nt.p)}return}
-    if(mode==='speak'&&nt.p.length<3)return; // 母音（声の高さ）がほとんどない区間は、息や雑音とみなす
-    out.push(nt);
-  });
-  return out.map(function(nt){return {start:nt.s*hop,end:nt.e*hop,pitch:mode==='speak'?fixPitch:Math.round(median(nt.p)),lyric:''}});
+  close(n-gap,'end');
+  notes.forEach(function(nt){ // 取り消しになった候補のフレームも、最後に中心の計算へ戻す
+    nt.hold.forEach(function(j){if(j<nt.e&&!isNaN(sm[j])){nt.p.push(sm[j]);if(steady(j))nt.q.push(sm[j])}});
+    nt.c=mode==='sing'?center(nt):fixPitch});
+  if(mode==='speak')notes=notes.filter(function(nt){return nt.p.length>=3}); // 母音（声の高さ）がほとんどない区間は、息や雑音とみなす
+  var minF=Math.round(P.minLen/hop),changed=true;
+  while(changed){ // 短い音は、つながっている隣のうち高さの近いほうへまとめる
+    changed=false;
+    for(var a=0;a<notes.length;a++){
+      var nt=notes[a];if(nt.e-nt.s>=minF)continue;
+      var nb=[];if(a>0&&nt.s-notes[a-1].e<=3)nb.push(notes[a-1]);if(a+1<notes.length&&notes[a+1].s-nt.e<=3)nb.push(notes[a+1]);
+      var ok=nb.filter(function(x){return mode==='speak'||(!isNaN(x.c)&&!isNaN(nt.c)&&Math.abs(x.c-nt.c)<=P.mergeSemi)});
+      if(!ok.length){if(nt.e-nt.s<6){notes.splice(a,1);changed=true;break}continue} // 60ms 未満で孤立：雑音とみなす
+      var t=ok[0];if(mode==='sing'&&ok.length>1&&Math.abs(ok[1].c-nt.c)<Math.abs(ok[0].c-nt.c))t=ok[1];
+      t.s=Math.min(t.s,nt.s);t.e=Math.max(t.e,nt.e);notes.splice(a,1);changed=true;break;
+    }
+  }
+  return notes.filter(function(nt){return mode==='speak'||!isNaN(nt.c)}).map(function(nt){
+    return {start:nt.s*hop,end:nt.e*hop,pitch:mode==='speak'?fixPitch:Math.round(nt.c),lyric:''}});
 }
 var SMALL='ぁぃぅぇぉゃゅょゎ';
 function toMora(text){
@@ -239,7 +276,7 @@ function toTicks(notes,bpm,q,legato,origin){ // origin：拍の線の基準（�
     }
     if(nx.e<=nx.s)nx.e=nx.s+Math.max(15,Math.min(q||30,(res[i+2]?res[i+2].s:nx.s+(q||30))-nx.s));
     if(res[i].e>nx.s)res[i].e=nx.s;
-    if(legato&&nx.s-res[i].e<=Math.max(q,0)*2+0.15*tps)res[i].e=nx.s;
+    if(legato&&nx.s-res[i].e<=0.1*tps)res[i].e=nx.s; // 0.1秒以下のすき間だけつなぐ（休符は残す）
   }
   return res;
 }
@@ -546,6 +583,11 @@ $('flowBtn').onclick=()=>{snap();flow();report();draw();selUI()};
 $('lyr').oninput=()=>{lyrFromHear=false;lyrGen++;if(notes.length){flow();report();draw();selUI()}};
 ['bpm','q','zoom'].forEach(id=>$(id).oninput=()=>draw());
 $('bpm').onchange=()=>{$('bpm').value=tempo();draw()}; // 入力を終えたら範囲内の数に直す
+{let taps=[]; // 曲に合わせてたたいた間隔の中央値からテンポを出す
+  $('tapBtn').onclick=()=>{const t=performance.now();if(taps.length&&t-taps[taps.length-1]>2000)taps=[];taps.push(t);if(taps.length>9)taps.shift();
+    if(taps.length<4){$('tapBtn').textContent=`タップ ${taps.length}`;return}
+    const iv=taps.slice(1).map((x,i)=>x-taps[i]).sort((a,b)=>a-b),med=iv[iv.length>>1],bpm=Math.round(60000/med);
+    $('bpm').value=Math.min(240,Math.max(40,bpm));$('tapBtn').textContent=`タップ ${taps.length}`;stopPlay();draw()}}
 // ---- 試聴 ----
 let playT0=0,playFrom=0,playEnd=0,playRaf=0,userScrollAt=0; // 再生位置の線：再生を始めた時刻・そのときの画面上の秒・終わる秒
 function stopPlay(){if(player){player.forEach(o=>{try{o.stop()}catch(e){}});player=null}cancelAnimationFrame(playRaf);$('playhead').hidden=true}
