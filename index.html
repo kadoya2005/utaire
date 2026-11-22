@@ -57,7 +57,7 @@ button:disabled{opacity:.45;cursor:default}
 <body>
 <header>
 <h1>うたいれ</h1>
-<p class="lead"><span class="ver">v7.4</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
+<p class="lead"><span class="ver">v7.5</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
 <ol class="steps">
 <li>歌詞を<b>ひらがな</b>で入れる（空のままでも、録音した声から自動で入ります）</li><li>「録音」を押して歌う → 「停止」</li><li>ピアノロールで確認・手直し → 「MIDIを保存」</li>
 </ol>
@@ -194,8 +194,8 @@ function segment(F,mode,fixPitch){
   var i=0;
   while(i<n){
     var voiced=!isNaN(sm[i]),L=loud(i);
-    if(voiced&&cur)lastV=i;
-    if(mode!=='speak'&&cur&&!voiced&&i-lastV>12){close(lastV+1,'f0');miss=0;gap=0} // 欠けと無音が交互に続いても、最後に声の高さが取れてから120msで切る
+    if(voiced&&L&&cur)lastV=i; // 声として数えるのは、音量もあるフレームだけ
+    if(mode!=='speak'&&cur&&!voiced&&i-lastV>Math.round(0.12/hop)){close(lastV+1,'f0');miss=0;gap=0} // 欠けと無音が交互に続いても、最後に声の高さが取れてから120msで切る
     if(cur&&L&&onset(i)&&i-cur.s>=8&&i-lastOn>=8){ // 音量の立ち上がりは、声の高さが取れなくても見る
       close(i,'onset');miss=0;gap=0;if(voiced||mode==='speak')start(i);else lastOn=i}
     if(mode!=='speak'&&L&&!voiced&&cur){ // 音量はあるのに声の高さだけ取れない：50ms までは切らない
@@ -217,7 +217,7 @@ function segment(F,mode,fixPitch){
             var k=candStart;while(k-1>cur.s+3&&slope(k-1)>P.slope/2)k--; // すべり始めまでさかのぼって区切る
             var moved=cur.idx.filter(function(j){return j>=k}).concat(hold);
             cur.idx=cur.idx.filter(function(j){return j<k});hold=[];
-            close(k,'pitch');start(k);cur.idx=moved;i++;continue}
+            close(k,'pitch');start(k);cur.idx=moved;lastV=i;i++;continue} // 新しい音符は、今のフレームまで声が続いている
           i++;continue}
       }
     }else if(cand>0&&voiced){hold.push(i);i++;continue}
@@ -311,20 +311,37 @@ function midiBytes(tn,bpm){
 function fitCount(notes,F,target,keepPitch){ // keepPitch：しゃべりモードなど、分けても高さを付け直さない
   notes=notes.map(function(x){return Object.assign({},x)}).sort(function(a,b){return a.start-b.start});
   var fr=F.fr,hop=F.hop,n=fr.length,db=fr.map(function(f){return 20*Math.log10(f.rms+1e-9)}),log={split:0,merge:0},EPS=1e-6,MIN=0.1;
-  function pitchOf(a,b,fb){if(keepPitch)return fb;var v=[];for(var j=Math.max(0,a);j<Math.min(b,n);j++)if(!isNaN(fr[j].midi))v.push(fr[j].midi);return v.length>=3?Math.round(median(v)):fb}
-  function bestIn(nt){ // その音符の中で、いちばん深い音量の谷（両側 0.1 秒以上残る所）
-    var s=Math.max(0,Math.round(nt.start/hop)),e=Math.min(n,Math.round(nt.end/hop));if(e-s<3)return null;
+  function rangeOf(t0,t1){return [Math.max(0,Math.ceil(t0/hop-EPS)),Math.min(n,Math.ceil(t1/hop-EPS))]} // 音符の時間 [始まり, 終わり) に入るフレーム
+  function pitchOf(t0,t1,fb){if(keepPitch)return fb;var r=rangeOf(t0,t1),v=[];for(var j=r[0];j<r[1];j++)if(!isNaN(fr[j].midi))v.push(fr[j].midi);return v.length>=3?Math.round(median(v)):fb}
+  function cands(nt){ // その音符の中の、音量の谷（左右とも 2dB 以上、両側 0.1 秒以上残る所）を時間順に
+    var r=rangeOf(nt.start,nt.end),s=r[0],e=r[1],out=[];if(e-s<3)return out;
     var sd=[];for(var i=s;i<e;i++){var a=Math.max(s,i-2),b=Math.min(e,i+3),t=0;for(var j=a;j<b;j++)t+=db[j];sd.push(t/(b-a))} // 音符の中だけで 50ms ならす
     var L=sd.slice(),R=sd.slice();for(var k=1;k<L.length;k++)L[k]=Math.max(L[k],L[k-1]);for(k=R.length-2;k>=0;k--)R[k]=Math.max(R[k],R[k+1]); // 左右の最大値を前もって求める
-    var best=null;
     for(k=1;k<sd.length-1;k++){var t2=(s+k)*hop;if(t2-nt.start<MIN-EPS||nt.end-t2<MIN-EPS)continue;
-      if(!(sd[k]<=sd[k-1]&&sd[k]<=sd[k+1]))continue;var d=Math.min(L[k],R[k])-sd[k];if(d>=2&&(!best||d>best.d))best={d:d,j:s+k}}
-    return best}
-  while(notes.length<target){
-    var bk=-1,bb=null;notes.forEach(function(nt,k){var c=bestIn(nt);if(c&&(!bb||c.d>bb.d)){bb=c;bk=k}});
-    if(!bb)break;
-    var nt=notes[bk],s0=Math.round(nt.start/hop),e0=Math.round(nt.end/hop),j0=bb.j;
-    notes.splice(bk,1,Object.assign({},nt,{end:j0*hop,pitch:pitchOf(s0,j0,nt.pitch),cut:'onset'}),Object.assign({},nt,{start:j0*hop,pitch:pitchOf(j0,e0,nt.pitch)}));log.split++;
+      if(!(sd[k]<=sd[k-1]&&sd[k]<=sd[k+1]))continue;var d=Math.min(L[k],R[k])-sd[k];if(d>=2)out.push({t:t2,d:d})}
+    return out}
+  function more(I,ch){ // 決めた分け目 ch のほかに、あと何か所分けられるか（左から詰めて数える）
+    var pts=[I.nt.start].concat(ch,[I.nt.end]),cnt=0;
+    for(var a=0;a+1<pts.length;a++){var last=pts[a],lim=pts[a+1];I.c.forEach(function(c){if(c.t>last+MIN-EPS&&lim-c.t>=MIN-EPS&&c.t>pts[a]&&c.t<lim){cnt++;last=c.t}})}
+    return cnt}
+  var need=target-notes.length;
+  if(need>0){ // 足りない：深い谷から選ぶ。ただし、それを選ぶと必要な数に届かなくなる谷は飛ばす
+    var info=notes.map(function(nt){return {nt:nt,c:cands(nt),ch:[]}}),all=[],got=0;
+    info.forEach(function(I,k){I.c.forEach(function(c){all.push({k:k,c:c})})});
+    all.sort(function(x,y){return y.c.d-x.c.d});
+    var capOf=function(over,ch){var t=got;info.forEach(function(I,k){t+=more(I,k===over?ch:I.ch)});return t};
+    for(var q=0;q<all.length&&got<need;q++){
+      var I=info[all[q].k],t=all[q].c.t;
+      if(I.ch.some(function(x){return Math.abs(x-t)<MIN-EPS}))continue; // 決めた分け目に近すぎる
+      var tr=I.ch.concat([t]).sort(function(a,b){return a-b});
+      var noIt=capOf(-1,null),withIt=1+capOf(all[q].k,tr); // 選んだときと選ばないときの、分けられる最大数
+      if(withIt>=Math.min(need,noIt)){I.ch=tr;got++}
+    }
+    for(var k2=info.length-1;k2>=0;k2--){var J=info[k2];if(!J.ch.length)continue; // 決めた分け目でまとめて分ける
+      var pts=[J.nt.start].concat(J.ch,[J.nt.end]),pieces=[];
+      for(var a2=0;a2+1<pts.length;a2++){var last=a2+2===pts.length;
+        pieces.push(Object.assign({},J.nt,{start:pts[a2],end:pts[a2+1],pitch:pitchOf(pts[a2],pts[a2+1],J.nt.pitch),cut:last?J.nt.cut:'onset'}))}
+      notes.splice(k2,1,...pieces);log.split+=J.ch.length}
   }
   while(notes.length>target){ // すき間なく隣り合う（重なっていない）2音のうち、高さが近くて短いものからまとめる。音量で分けた切れ目はまとめにくく
     var mk=-1,mc=Infinity;
@@ -773,7 +790,7 @@ cv.onpointerdown=e=>{
   if(drag)return;                         // ほかの指でドラッグ中
   const p=posOf(e),h=hitNote(p.x,p.y);cancelTap();
   if(h){sel=h.i;const n=notes[h.i];
-    drag={n,mode:h.edge?'len':'move',x0:p.x,y0:p.y,s0:n.start,e0:n.end,p0:n.pitch,moved:false,id:e.pointerId,pxs:pxsNow(),before:null};
+    drag={prev:notes[h.i-1],n,mode:h.edge?'len':'move',x0:p.x,y0:p.y,s0:n.start,e0:n.end,p0:n.pitch,moved:false,id:e.pointerId,pxs:pxsNow(),before:null};
     try{cv.setPointerCapture(e.pointerId)}catch(_){}
     draw();selUI();return}
   // 何もないところ：長押しで音符を追加（動いたり、スクロールになったら取り消し）
@@ -800,7 +817,8 @@ function endDrag(e){
     return}
   if(!drag||e.pointerId!==drag.id)return;const d=drag;drag=null;
   if(d.moved){hist.push(d.before);if(hist.length>50)hist.shift();$('undoBtn').disabled=false; // 確定したときだけ元に戻す記録を残す
-    notes.sort((a,b)=>a.start-b.start);sel=notes.indexOf(d.n);lyrGen++;report();updBtns();draw();selUI()}
+    notes.sort((a,b)=>a.start-b.start);sel=notes.indexOf(d.n);
+    if(d.mode==='len'||d.hmoved){delete d.n.cut;if(d.prev)delete d.prev.cut;if(sel>0)delete notes[sel-1].cut} // 時間を動かしたら、まわりの切れ目の理由は消すlyrGen++;report();updBtns();draw();selUI()}
   else{draw();blip(d.n.pitch)} // タップだけなら音を鳴らして選ぶ
 }
 function cancelDrag(e){
@@ -818,7 +836,7 @@ function addNoteAt(x,y){
   const n={start:s,end:s+len,pitch:p,lyric:'あ'};
   const next=notes.filter(m=>m.start>s+1e-6).sort((a,b)=>a.start-b.start)[0]; // 次の音符にかぶらない長さにする
   if(next&&next.start<n.end)n.end=Math.max(s+Math.max(gs||0.05,0.05),next.start);
-  snap();notes.push(n);notes.sort((a,b)=>a.start-b.start);sel=notes.indexOf(n);
+  snap();notes.push(n);notes.sort((a,b)=>a.start-b.start);sel=notes.indexOf(n);if(sel>0)delete notes[sel-1].cut;
   lyrGen++;blip(p);report();updBtns();draw();selUI();
   hearSt('音符を足しました（歌詞は「あ」）。下の「歌詞」欄で変えられます。歌詞を流し込み直すと、順番どおりに入れ直します。');
 }
@@ -830,10 +848,10 @@ function selUI(){const on=sel>=0&&notes[sel];['selLyric','upBtn','dnBtn','mPrev'
 const act=f=>()=>{if(sel<0)return;stopPlay();snap();f();if(notes.length)report();else status('音符がありません。');updBtns();draw();selUI()};
 $('selLyric').onchange=act(()=>{notes[sel].lyric=$('selLyric').value.trim()||'-';lyrGen++});
 $('upBtn').onclick=act(()=>{notes[sel].pitch=Math.min(127,notes[sel].pitch+1);blip(notes[sel].pitch)});$('dnBtn').onclick=act(()=>{notes[sel].pitch=Math.max(0,notes[sel].pitch-1);blip(notes[sel].pitch)});
-$('mPrev').onclick=act(()=>{const p=notes[sel-1];p.end=Math.max(p.end,notes[sel].end);notes.splice(sel,1);sel--}); // 長いほうの終わりまでつなぐ
-$('mNext').onclick=act(()=>{const n=notes[sel+1];notes[sel].end=Math.max(notes[sel].end,n.end);notes.splice(sel+1,1)});
-$('splitBtn').onclick=act(()=>{const n=notes[sel],m=(n.start+n.end)/2;notes.splice(sel+1,0,{start:m,end:n.end,pitch:n.pitch,lyric:'-'});n.end=m});
-$('delBtn').onclick=act(()=>{notes.splice(sel,1);sel=Math.min(sel,notes.length-1)});
+$('mPrev').onclick=act(()=>{const p=notes[sel-1],c=notes[sel];if(c.end>=p.end)p.cut=c.cut;p.end=Math.max(p.end,c.end);notes.splice(sel,1);sel--}); // 長いほうの終わりまでつなぐ（終わりの切れ目の理由も引き継ぐ） // 長いほうの終わりまでつなぐ
+$('mNext').onclick=act(()=>{const c=notes[sel],n=notes[sel+1];if(n.end>=c.end)c.cut=n.cut;c.end=Math.max(c.end,n.end);notes.splice(sel+1,1)});
+$('splitBtn').onclick=act(()=>{const n=notes[sel],m=(n.start+n.end)/2;notes.splice(sel+1,0,{start:m,end:n.end,pitch:n.pitch,lyric:'-',cut:n.cut});n.end=m;delete n.cut}); // 元の終わりの理由は右へ
+$('delBtn').onclick=act(()=>{if(sel>0)delete notes[sel-1].cut;notes.splice(sel,1);sel=Math.min(sel,notes.length-1)}); // 前の音の隣が変わる
 $('undoBtn').onclick=()=>{if(!hist.length||drag)return;stopPlay();notes=JSON.parse(hist.pop());sel=-1;lyrGen++;$('undoBtn').disabled=!hist.length;if(notes.length)report();else status('音符がありません。');updBtns();draw();selUI()};
 ['bpm','q'].forEach(id=>$(id).addEventListener('input',()=>stopPlay())); // テンポや「そろえる」を変えたら試聴を止める（音と表示がずれないように）
 document.addEventListener('keydown',e=>{if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||e.target.tagName==='SELECT'||sel<0||drag)return;
