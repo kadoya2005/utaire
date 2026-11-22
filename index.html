@@ -57,7 +57,7 @@ button:disabled{opacity:.45;cursor:default}
 <body>
 <header>
 <h1>うたいれ</h1>
-<p class="lead"><span class="ver">v7.1</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
+<p class="lead"><span class="ver">v7.2</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
 <ol class="steps">
 <li>歌詞を<b>ひらがな</b>で入れる（空のままでも、録音した声から自動で入ります）</li><li>「録音」を押して歌う → 「停止」</li><li>ピアノロールで確認・手直し → 「MIDIを保存」</li>
 </ol>
@@ -101,6 +101,7 @@ button:disabled{opacity:.45;cursor:default}
 <div class="row" style="margin-top:10px">
 <button id="reBtn" disabled>設定を変えて解析しなおす</button>
 <button id="flowBtn" disabled>歌詞を流し込み直す</button>
+<button id="fitBtn" disabled title="歌詞の音の数に合わせて、音量の谷で音符を分けたり、近い音をまとめたりします">音符の数を歌詞に合わせる</button>
 <button id="playBtn" disabled>▶ 音符を試聴</button>
 <button id="origBtn" disabled>▶ 録音を再生</button>
 <button id="saveBtn" class="main" disabled>MIDIを保存</button>
@@ -301,7 +302,35 @@ function midiBytes(tn,bpm){
   var L=tr.length,hd=[0x4d,0x54,0x68,0x64,0,0,0,6,0,0,0,1,0x01,0xE0];
   return new Uint8Array(hd.concat([0x4d,0x54,0x72,0x6b,(L>>>24)&255,(L>>16)&255,(L>>8)&255,L&255],tr));
 }
-return {frames:frames,segment:segment,toMora:toMora,toTicks:toTicks,barBase:barBase,midiBytes:midiBytes,yin:yin};
+// 歌詞の音の数に、音符の数を合わせる
+// 足りない：音符の中で音量がいちばん深く下がっている所（左右とも 2dB 以上、両側 0.1 秒以上残る所）で分ける
+// 多すぎる：すき間 0.05 秒以下で隣り合う 2 音のうち、高さが近くて短いものからまとめる
+function fitCount(notes,F,target){
+  notes=notes.map(function(x){return Object.assign({},x)});
+  var fr=F.fr,hop=F.hop,n=fr.length,db=fr.map(function(f){return 20*Math.log10(f.rms+1e-9)}),sdb=[],log={split:0,merge:0};
+  for(var i=0;i<n;i++){var a=Math.max(0,i-2),b=Math.min(n,i+3),t=0;for(var j=a;j<b;j++)t+=db[j];sdb.push(t/(b-a))} // 50ms でならす
+  function pitchOf(a,b,fb){var v=[];for(var j=a;j<Math.min(b,n);j++)if(!isNaN(fr[j].midi))v.push(fr[j].midi);return v.length>=3?Math.round(median(v)):fb}
+  function mx(a,b){var m=-Infinity;for(var j=a;j<b;j++)m=Math.max(m,sdb[j]);return m}
+  while(notes.length<target){
+    var best=null;
+    notes.forEach(function(nt,k){var s=Math.round(nt.start/hop),e=Math.round(nt.end/hop);
+      for(var j=s+10;j<e-10;j++){if(!(sdb[j]<=sdb[j-1]&&sdb[j]<=sdb[j+1]))continue;
+        var d=Math.min(mx(s,j+1),mx(j,e))-sdb[j];if(d>=2&&(!best||d>best.d))best={d:d,k:k,j:j}}});
+    if(!best)break;
+    var nt=notes[best.k],s0=Math.round(nt.start/hop),e0=Math.round(nt.end/hop),j0=best.j;
+    notes.splice(best.k,1,Object.assign({},nt,{end:j0*hop,pitch:pitchOf(s0,j0,nt.pitch)}),Object.assign({},nt,{start:j0*hop,pitch:pitchOf(j0,e0,nt.pitch)}));log.split++;
+  }
+  while(notes.length>target){
+    var bk=-1,bc=Infinity;
+    for(var k=0;k+1<notes.length;k++){var x=notes[k],y=notes[k+1];if(y.start-x.end>0.05)continue;
+      var c=Math.abs(x.pitch-y.pitch)+Math.min(x.end-x.start,y.end-y.start)*5;if(c<bc){bc=c;bk=k}}
+    if(bk<0)break;
+    var x2=notes[bk],y2=notes[bk+1],lg=(x2.end-x2.start)>=(y2.end-y2.start)?x2:y2;
+    notes.splice(bk,2,Object.assign({},x2,{end:y2.end,pitch:lg.pitch}));log.merge++;
+  }
+  return {notes:notes,split:log.split,merge:log.merge};
+}
+return {frames:frames,segment:segment,fitCount:fitCount,toMora:toMora,toTicks:toTicks,barBase:barBase,midiBytes:midiBytes,yin:yin};
 })();
 if(typeof module!=='undefined')module.exports=Core;
 </script>
@@ -322,13 +351,13 @@ function status(t,bad,html){const s=$('st');if(html)s.innerHTML=t;else s.textCon
 const tempo=()=>{const v=+$('bpm').value;return !Number.isFinite(v)||v<=0?120:Math.min(240,Math.max(40,v))};
 // ピアノロールの幅がブラウザの上限（約32000px）を超えないよう、長い録音では拡大を自動で抑える
 const pxsNow=()=>{if(drag)return drag.pxs;const dur=Math.max(audio?audio.length/sr:4,4,...notes.map(n=>n.end+1));return Math.min(+$('zoom').value,(30000-60)/dur)};
-function updBtns(){['flowBtn','playBtn','saveBtn'].forEach(id=>$(id).disabled=!notes.length)}
+function updBtns(){['flowBtn','playBtn','saveBtn','fitBtn'].forEach(id=>$(id).disabled=!notes.length)}
 function snap(){hist.push(JSON.stringify(notes));if(hist.length>50)hist.shift();$('undoBtn').disabled=false}
 function flow(){const r=Core.toMora($('lyr').value);notes.forEach((n,i)=>n.lyric=r.mora[i]||'-');return r}
 function report(){
   const r=Core.toMora($('lyr').value),m=r.mora.length,n=notes.length;
   let t=`音符 <b>${n}</b> 個 ／ 歌詞 <b>${m}</b> 音`;
-  if(m&&n!==m)t+=n>m?`。音符が ${n-m} 個多いです（歌詞を流し込むと、余りは「-」＝前の音をのばす、になります）。不要な音符は「前とつなぐ」で減らせます。`:`。歌詞が ${m-n} 音余っています。歌い直すか、長い音符を「半分に分ける」で増やしてください。`;
+  if(m&&n!==m)t+=n>m?`。音符が ${n-m} 個多いです（歌詞を流し込むと、余りは「-」＝前の音をのばす、になります）。「音符の数を歌詞に合わせる」で自動でまとめられます。`:`。歌詞が ${m-n} 音余っています。「音符の数を歌詞に合わせる」で、音量の切れ目から自動で増やせます。`;
   if(r.bad)t+=`<br><span class="bad">ひらがなでない文字があります：${esc(r.bad.slice(0,10))}（漢字はひらがなに直してください）</span>`;
   status(t,false,true);
 }
@@ -340,7 +369,7 @@ function analyze(){
     notes=Core.segment(F,mode(),+$('fix').value);origin=notes.length?notes[0].start:0;hist=[];$('undoBtn').disabled=true;sel=-1;
     if(!notes.length){status('声が見つかりませんでした。マイクに近づいて、もう少し大きな声で試してください。',true)}
     else{flow();report()}
-    ['reBtn','flowBtn','playBtn','origBtn','saveBtn'].forEach(id=>$(id).disabled=!notes.length&&id!=='origBtn');
+    ['reBtn','flowBtn','fitBtn','playBtn','origBtn','saveBtn'].forEach(id=>$(id).disabled=!notes.length&&id!=='origBtn');
     $('origBtn').disabled=false;draw();selUI();scrollToNotes();
   },20);
 }
@@ -584,6 +613,15 @@ $('diagCopy').onclick=async()=>{const t=navigator.userAgent+'\n'+diag.join('\n')
 document.querySelectorAll('input[name=mode]').forEach(r=>r.onchange=()=>{$('fixw').style.opacity=mode()==='speak'?1:.5;if(audio)analyze()});
 $('fixw').style.opacity=.5;
 $('flowBtn').onclick=()=>{snap();flow();report();draw();selUI()};
+$('fitBtn').onclick=()=>{
+  const m=Core.toMora($('lyr').value).mora.length;
+  if(!m){status('先に歌詞を入れてください。',true);return}
+  if(!F||!notes.length)return;
+  if(m===notes.length){status('音符の数は、もう歌詞と同じです。');return}
+  stopPlay();snap();const r=Core.fitCount(notes,F,m);notes=r.notes;sel=-1;lyrGen++;flow();report();updBtns();draw();selUI();
+  const msg=(r.split?`音量の谷で ${r.split} か所分けました。`:'')+(r.merge?`近い音を ${r.merge} か所まとめました。`:'');
+  hearSt((msg||'合わせられる所が見つかりませんでした。')+(notes.length!==m?`（まだ ${Math.abs(notes.length-m)} 個ずれています。ピアノロールで直してください）`:'')+' 「元に戻す」で戻せます。',notes.length!==m);
+};
 $('lyr').oninput=()=>{lyrFromHear=false;lyrGen++;if(notes.length){flow();report();draw();selUI()}};
 ['bpm','q','zoom'].forEach(id=>$(id).oninput=()=>draw());
 $('bpm').onchange=()=>{$('bpm').value=tempo();draw()}; // 入力を終えたら範囲内の数に直す
