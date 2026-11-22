@@ -1,6 +1,6 @@
 // うたいれ v6 — オフラインで起動できるように、アプリ本体のファイルだけを保存しておく
 // （辞書やAIモデルなど外のサイトのファイルはここでは扱わない。AIモデルはライブラリが自分で保存する）
-const CACHE='utaire-v8-1';
+const CACHE='utaire-v8-2';
 const FILES=['./','./index.html','./manifest.webmanifest','./icon-192.png','./icon-512.png'];
 const KEYS=new Set(FILES.map(f=>new URL(f,self.location).href)); // 保存してよいのはこの5つだけ
 self.addEventListener('install',e=>{e.waitUntil(caches.open(CACHE).then(c=>c.addAll(FILES)));self.skipWaiting()});

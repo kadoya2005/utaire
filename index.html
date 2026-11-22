@@ -57,7 +57,7 @@ button:disabled{opacity:.45;cursor:default}
 <body>
 <header>
 <h1>うたいれ</h1>
-<p class="lead"><span class="ver">v8.1</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
+<p class="lead"><span class="ver">v8.2</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
 <ol class="steps">
 <li>歌詞を<b>ひらがな</b>で入れる（空のままでも、録音した声から自動で入ります）</li><li>「録音」を押して歌う → 「停止」</li><li>ピアノロールで確認・手直し → 「MIDIを保存」</li>
 </ol>
@@ -101,7 +101,7 @@ button:disabled{opacity:.45;cursor:default}
 <div class="row" style="margin-top:10px">
 <button id="reBtn" disabled>設定を変えて解析しなおす</button>
 <button id="flowBtn" disabled>歌詞を流し込み直す</button>
-<button id="alignBtn" disabled class="main" title="歌詞の一文字ずつの音（子音の種類）を手がかりに、文字の数ちょうどに区切り直します">歌詞で区切る</button>
+<button id="alignBtn" disabled class="main" title="歌詞の一音ずつ（「きゃ」は1音）の子音の種類を手がかりに、音の数ちょうどに区切り直します">歌詞で区切る</button>
 <button id="fitBtn" disabled title="歌詞の音の数に合わせて、音量の谷で音符を分けたり、近い音をまとめたりします">音符の数を歌詞に合わせる</button>
 <button id="playBtn" disabled>▶ 音符を試聴</button>
 <button id="origBtn" disabled>▶ 録音を再生</button>
@@ -341,7 +341,7 @@ function fitCount(notes,F,target,keepPitch){ // keepPitch：しゃべりモー�
     for(var k2=info.length-1;k2>=0;k2--){var J=info[k2];if(!J.ch.length)continue; // 決めた分け目でまとめて分ける
       var pts=[J.nt.start].concat(J.ch,[J.nt.end]),pieces=[];
       for(var a2=0;a2+1<pts.length;a2++){var last=a2+2===pts.length;
-        pieces.push(Object.assign({},J.nt,{start:pts[a2],end:pts[a2+1],pitch:pitchOf(pts[a2],pts[a2+1],J.nt.pitch),cut:last?J.nt.cut:'onset'}))}
+        pieces.push(Object.assign({},J.nt,{start:pts[a2],end:pts[a2+1],pitch:pitchOf(pts[a2],pts[a2+1],J.nt.pitch),cut:last?J.nt.cut:'onset',weak:a2?false:J.nt.weak}))}
       notes.splice(k2,1,...pieces);log.split+=J.ch.length}
   }
   while(notes.length>target){ // すき間なく隣り合う（重なっていない）2音のうち、高さが近くて短いものからまとめる。音量で分けた切れ目はまとめにくく
@@ -448,7 +448,7 @@ function alignLyrics(F,text,data,sr0,fixPitch){
   lastLoud[0]=-1;for(t=0;t<n;t++)lastLoud[t+1]=loud[t]?t:lastLoud[t];
   var mu=Math.max(0.06,(vc[B]-vc[A])*hop/M),sig=0.65;
   function segscore(a,b,ty){ // 区間の前後の無音は削って、実際に声のある長さで評価する
-    var a2=firstLoud[a],b2=lastLoud[b]+1;if(a2>=b2)return -50;var pen=0;
+    var a2=firstLoud[a],b2=lastLoud[b]+1;if(a2>=b2)return ty==='Q'?-50:null;var pen=0; // 声のない区間には「っ」しか置かない
     if(cs[b2]-cs[Math.min(a2+1,b2)]>0)pen-=8; // 長い休みをまたぐ音符はだめ
     var dur=(b2-a2)*hop,v=vc[b2]-vc[a2],m_=mu*(ty==='Q'?0.6:1),s_=ty==='Q'?0.8:sig,lg=Math.log(dur/m_)/s_;
     pen+=-0.5*lg*lg;var cap=Math.max(0.8,3*mu);if(dur>cap)pen-=(dur-cap)*2;if(v<3&&ty!=='Q')pen-=2;return pen}
@@ -456,11 +456,12 @@ function alignLyrics(F,text,data,sr0,fixPitch){
   var dpS=[new Map([[A,0]])],dpA=[new Map([[A,-1]])];
   for(k=1;k<=M;k++){
     var last=k===M,cand=[];if(last)cand=[B];else for(t=A+minF*k;t<=B-minF*(M-k);t++)cand.push(t);
-    var prev=Array.from(dpS[k-1].entries()).sort(function(x,y){return x[0]-y[0]}),curS=new Map(),curA=new Map();
+    var prev=Array.from(dpS[k-1].entries()).sort(function(x,y){return x[0]-y[0]}),curS=new Map(),curA=new Map(),pf=prev.map(function(x){return firstLoud[x[0]]});
     cand.forEach(function(t){
       var b=last?0:bscore(t,types[k]);if(!last&&PHRASE[k])b+=longStart[t]?1:-0.5; // 歌詞の空白のあとは、休みのあとに始まりやすい
-      var best=-1e18,arg=-1;
-      for(var z=0;z<prev.length;z++){var q=prev[z][0];if(q>t-minF)break;if(t-q>maxF)continue;var v=prev[z][1]+segscore(q,t,types[k-1])+b;if(v>best){best=v;arg=q}}
+      var best=-1e18,arg=-1,lim=lastLoud[t]+1-maxF,lo=0,hi=pf.length;
+      while(lo<hi){var md=(lo+hi)>>1;if(pf[md]<lim)lo=md+1;else hi=md} // 前後の無音を除いた長さが上限を超えない所から見る（長い休みのあとでも区切れる）
+      for(var z=lo;z<prev.length;z++){var q=prev[z][0];if(q>t-minF)break;if(prev[z][1]+b<=best)continue;var g=segscore(q,t,types[k-1]);if(g===null)continue;var v=prev[z][1]+g+b;if(v>best){best=v;arg=q}} // segscore は 0 以下なので、勝てない候補は計算しない
       if(arg>=0){curS.set(t,best);curA.set(t,arg)}});
     dpS.push(curS);dpA.push(curA);
   }
@@ -497,7 +498,7 @@ function status(t,bad,html){const s=$('st');if(html)s.innerHTML=t;else s.textCon
 const tempo=()=>{const v=+$('bpm').value;return !Number.isFinite(v)||v<=0?120:Math.min(240,Math.max(40,v))};
 // ピアノロールの幅がブラウザの上限（約32000px）を超えないよう、長い録音では拡大を自動で抑える
 const pxsNow=()=>{if(drag)return drag.pxs;const dur=Math.max(audio?audio.length/sr:4,4,...notes.map(n=>n.end+1));return Math.min(+$('zoom').value,(30000-60)/dur)};
-function updBtns(){['flowBtn','playBtn','saveBtn','fitBtn'].forEach(id=>$(id).disabled=!notes.length);$('alignBtn').disabled=!audio}
+function updBtns(){['flowBtn','playBtn','saveBtn','fitBtn'].forEach(id=>$(id).disabled=!notes.length);$('alignBtn').disabled=!audio||aligning}
 function snap(){hist.push(JSON.stringify(notes));if(hist.length>50)hist.shift();$('undoBtn').disabled=false}
 function flow(){const r=Core.toMora($('lyr').value);notes.forEach((n,i)=>n.lyric=r.mora[i]||'-');return r}
 function report(){
@@ -509,20 +510,21 @@ function report(){
 }
 function analyze(){
   if(!audio)return;
+  alignCancel(); // 計算中の「歌詞で区切る」は取り消す
   status('解析中…');
   setTimeout(()=>{
     if(!F){F=Core.frames(audio,sr);if(F.gain>1.05)dlog('声が小さめなので '+F.gain.toFixed(1)+' 倍にそろえて解析')}
     notes=Core.segment(F,mode(),+$('fix').value);origin=notes.length?notes[0].start:0;hist=[];$('undoBtn').disabled=true;sel=-1;
     if(!notes.length){status('声が見つかりませんでした。マイクに近づいて、もう少し大きな声で試してください。',true)}
     else{flow();report()}
-    $('alignBtn').disabled=!audio;
+    $('alignBtn').disabled=!audio||aligning;
     ['reBtn','flowBtn','fitBtn','playBtn','origBtn','saveBtn'].forEach(id=>$(id).disabled=!notes.length&&id!=='origBtn');
     $('origBtn').disabled=false;draw();selUI();scrollToNotes();
   },20);
 }
 let audioId=0; // 音声を読み込むたびに増やす。古い処理の結果が新しい音声に混ざらないようにする
 let loading=false;
-function newAudioId(){audioId++;loading=true;if(!asrRun)$('aiBtn').disabled=true;return audioId} // 録音停止・ファイル選択の瞬間に呼ぶ
+function newAudioId(){audioId++;loading=true;alignCancel();if(!asrRun)$('aiBtn').disabled=true;return audioId} // 録音停止・ファイル選択の瞬間に呼ぶ
 async function useBuffer(buf,my){
   if(my===undefined)my=newAudioId();
   if(my!==audioId)return false; // もっと新しい音声が頼まれている
@@ -760,21 +762,45 @@ $('diagCopy').onclick=async()=>{const t=navigator.userAgent+'\n'+diag.join('\n')
 document.querySelectorAll('input[name=mode]').forEach(r=>r.onchange=()=>{$('fixw').style.opacity=mode()==='speak'?1:.5;if(audio)analyze()});
 $('fixw').style.opacity=.5;
 $('flowBtn').onclick=()=>{snap();flow();report();draw();selUI()};
-$('alignBtn').onclick=()=>{
-  if(drag||loading||!audio)return;
+// 「歌詞で区切る」の計算は Worker で動かす（長い録音でも画面が止まらない。新しい音声が来たら取り消せる）
+let alignW=null,alignJob=0,aligning=false;
+function alignKill(){if(alignW){alignW.terminate();alignW=null}}
+function alignCancel(){if(aligning){alignJob++;aligning=false;alignKill();$('alignBtn').disabled=!audio}}
+function alignRun(F,text,data,sr,fix){
+  return new Promise((res,rej)=>{
+    if(!alignW){
+      const code=$('core').textContent+'\nonmessage=e=>{const d=e.data;try{postMessage({r:Core.alignLyrics(d.F,d.text,d.data,d.sr,d.fix)})}catch(x){postMessage({err:String(x&&x.message||x)})}};';
+      const u=URL.createObjectURL(new Blob([code],{type:'text/javascript'}));
+      try{alignW=new Worker(u)}catch(e){alignW=null}finally{setTimeout(()=>URL.revokeObjectURL(u),1000)}
+      if(!alignW){try{res(Core.alignLyrics(F,text,data,sr,fix))}catch(e){rej(e)}return} // Worker が使えないブラウザでは、その場で計算
+    }
+    const w=alignW;
+    w.onmessage=e=>e.data.err?rej(new Error(e.data.err)):res(e.data.r);
+    w.onerror=e=>{e.preventDefault();alignKill();rej(new Error(e.message||'計算できませんでした'))};
+    w.postMessage({F,text,data,sr,fix});
+  });
+}
+$('alignBtn').onclick=async()=>{
+  if(rec||recBusy){status('録音中は使えません。録音を止めてから押してください。',true);return}
+  if(loading){status('音声を読み込んでいます。終わってから押してください。',true);return}
+  if(drag||!audio||aligning)return;
   const mr=Core.toMora($('lyr').value),m=mr.mora.length;
   if(!m){status('先に歌詞を入れてください（声から歌詞を入れても大丈夫です）。',true);return}
   if(mr.bad){status('歌詞にひらがなでない文字があります（'+mr.bad.slice(0,10)+'）。ひらがなに直してから押してください。',true);return}
   if(!F)F=Core.frames(audio,sr);
-  status('歌詞に合わせて区切っています…');const gen=lyrGen,aid=audioId;
-  setTimeout(()=>{
-    if(gen!==lyrGen||aid!==audioId)return; // 待つ間に歌詞や音声が変わった
-    const res=Core.alignLyrics(F,$('lyr').value,audio,sr,mode()==='speak'?+$('fix').value:null);
-    if(!res){status('歌詞に合わせて区切れませんでした（声が短すぎる、または歌詞が多すぎます）。',true);return}
-    stopPlay();snap();notes=res;sel=-1;lyrGen++;flow();report();updBtns();draw();selUI();
-    const w=res.filter(n=>n.weak).length;
-    hearSt(`歌詞の ${m} 音に合わせて区切りました。`+(w?`点線の ${w} 個は切れ目の手がかりが弱い所です。▶で聞いて、ずれていたらドラッグで直してください。`:'')+' 「元に戻す」で戻せます。');
-  },30);
+  const gen=lyrGen,aid=audioId,job=++alignJob;
+  aligning=true;$('alignBtn').disabled=true;
+  status('歌詞に合わせて区切っています…'+(audio.length/sr>30?'（長い録音なので、少し時間がかかります）':''));
+  let res;
+  try{res=await alignRun(F,$('lyr').value,audio,sr,mode()==='speak'?+$('fix').value:null)}
+  catch(e){if(job===alignJob){aligning=false;updBtns();status('区切る計算に失敗しました：'+e.message,true)}return}
+  if(job!==alignJob)return; // 取り消された（新しい音声・再解析）
+  aligning=false;updBtns();
+  if(gen!==lyrGen||aid!==audioId||rec||drag){status('計算している間に歌詞・音声・音符が変わったので、結果は使いませんでした。もう一度押してください。',true);return}
+  if(!res){status('歌詞に合わせて区切れませんでした（声が短すぎる、または歌詞が多すぎます）。',true);return}
+  stopPlay();snap();notes=res;sel=-1;lyrGen++;flow();report();updBtns();draw();selUI();
+  const w=res.filter(n=>n.weak).length;
+  hearSt(`歌詞の ${m} 音に合わせて区切りました。`+(w?`点線の ${w} 個は切れ目の手がかりが弱い所です。▶で聞いて、ずれていたらドラッグで直してください。`:'')+' 「元に戻す」で戻せます。');
 };
 $('fitBtn').onclick=()=>{
   if(drag||loading)return;
@@ -959,7 +985,8 @@ function endDrag(e){
   if(!drag||e.pointerId!==drag.id)return;const d=drag;drag=null;
   if(d.moved){hist.push(d.before);if(hist.length>50)hist.shift();$('undoBtn').disabled=false; // 確定したときだけ元に戻す記録を残す
     notes.sort((a,b)=>a.start-b.start);sel=notes.indexOf(d.n);
-    if(d.mode==='len'||d.hmoved){delete d.n.weak;delete d.n.cut;if(d.prev)delete d.prev.cut;if(sel>0)delete notes[sel-1].cut} // 時間を動かしたら、まわりの切れ目の理由は消す
+    if(d.n.start!==d.s0){delete d.n.weak;if(d.prev)delete d.prev.cut;if(sel>0)delete notes[sel-1].cut} // 左端を動かしたら、その切れ目の印と理由を消す
+    if(d.n.end!==d.e0)delete d.n.cut; // 右端を動かしたら、右の切れ目の理由を消す
     lyrGen++;report();updBtns();draw();selUI()}
   else{draw();blip(d.n.pitch)} // タップだけなら音を鳴らして選ぶ
 }
