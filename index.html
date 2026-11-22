@@ -57,7 +57,7 @@ button:disabled{opacity:.45;cursor:default}
 <body>
 <header>
 <h1>うたいれ</h1>
-<p class="lead"><span class="ver">v6.1</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
+<p class="lead"><span class="ver">v6.2</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
 <ol class="steps">
 <li>歌詞を<b>ひらがな</b>で入れる（空のままでも、録音した声から自動で入ります）</li><li>「録音」を押して歌う → 「停止」</li><li>ピアノロールで確認・手直し → 「MIDIを保存」</li>
 </ol>
@@ -223,14 +223,20 @@ function toTicks(notes,bpm,q,legato,origin){ // origin：拍の線の基準（�
   var tps=bpm/60*480,res=[],first=barBase(notes,bpm,origin),lead=1920; // 先頭に1小節あけ、最初の音符はかならず2小節目に入る
   notes=notes.slice().sort(function(a,b){return a.start-b.start});
   notes.forEach(function(n){
-    var s=Math.round((n.start-first)*tps)+lead,e=Math.round((n.end-first)*tps)+lead;
+    var rs=Math.round((n.start-first)*tps)+lead,re=Math.round((n.end-first)*tps)+lead,s=rs,e=re; // rs/re：そろえる前の本当の位置
     if(q>0){s=Math.round(s/q)*q;e=Math.round(e/q)*q;if(e<=s)e=s+q}else if(e<=s)e=s+30;
-    res.push({s:s,e:e,pitch:n.pitch,lyric:n.lyric});
+    res.push({s:s,e:e,rs:rs,pitch:n.pitch,lyric:n.lyric});
   });
   for(var i=0;i<res.length;i++){
     var nx=res[i+1];if(!nx)break;
-    if(nx.s<res[i].s+ (q||30))nx.s=res[i].s+(q||30);
-    if(nx.e<=nx.s)nx.e=nx.s+(q||30);
+    if(nx.s<=res[i].s){ // 前の音と同じマス目に入ってしまった（16分より速い歌詞など）
+      // 後ろへ1マスずつ押し出すと、ずれが積み重なって途中からテンポが遅れたように聞こえる。
+      // かわりに細かいマス目（32分→64分…）で本当の位置に近いところへ置く
+      var f=q>0?q:30,ns=nx.s;
+      while(f>15){f=f/2;ns=Math.round(nx.rs/f)*f;if(ns>res[i].s)break}
+      nx.s=Math.max(ns,res[i].s+15);
+    }
+    if(nx.e<=nx.s)nx.e=nx.s+Math.max(15,Math.min(q||30,(res[i+2]?res[i+2].s:nx.s+(q||30))-nx.s));
     if(res[i].e>nx.s)res[i].e=nx.s;
     if(legato&&nx.s-res[i].e<=Math.max(q,0)*2+0.15*tps)res[i].e=nx.s;
   }
