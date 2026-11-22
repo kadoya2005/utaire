@@ -57,7 +57,7 @@ button:disabled{opacity:.45;cursor:default}
 <body>
 <header>
 <h1>うたいれ</h1>
-<p class="lead"><span class="ver">v8</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
+<p class="lead"><span class="ver">v8.1</span> マイクで歌う（またはしゃべる）と、音の長さ・高さ・歌詞が入ったMIDIファイルを作ります。OpenUtauにそのままドラッグして開けます。</p>
 <ol class="steps">
 <li>歌詞を<b>ひらがな</b>で入れる（空のままでも、録音した声から自動で入ります）</li><li>「録音」を押して歌う → 「停止」</li><li>ピアノロールで確認・手直し → 「MIDIを保存」</li>
 </ol>
@@ -959,7 +959,8 @@ function endDrag(e){
   if(!drag||e.pointerId!==drag.id)return;const d=drag;drag=null;
   if(d.moved){hist.push(d.before);if(hist.length>50)hist.shift();$('undoBtn').disabled=false; // 確定したときだけ元に戻す記録を残す
     notes.sort((a,b)=>a.start-b.start);sel=notes.indexOf(d.n);
-    if(d.mode==='len'||d.hmoved){delete d.n.weak;delete d.n.cut;if(d.prev)delete d.prev.cut;if(sel>0)delete notes[sel-1].cut} // 時間を動かしたら、まわりの切れ目の理由は消すlyrGen++;report();updBtns();draw();selUI()}
+    if(d.mode==='len'||d.hmoved){delete d.n.weak;delete d.n.cut;if(d.prev)delete d.prev.cut;if(sel>0)delete notes[sel-1].cut} // 時間を動かしたら、まわりの切れ目の理由は消す
+    lyrGen++;report();updBtns();draw();selUI()}
   else{draw();blip(d.n.pitch)} // タップだけなら音を鳴らして選ぶ
 }
 function cancelDrag(e){
